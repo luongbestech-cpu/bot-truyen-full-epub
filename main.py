@@ -4,7 +4,7 @@ import re
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import cloudscraper  # Thư viện chuyên vượt chống bot
+import cloudscraper
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from telegram import Update
@@ -31,9 +31,8 @@ def run_web_server():
 # ============================================================
 # CẤU HÌNH BOT & SCRAPER
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
 
-# Sử dụng cloudscraper để giả lập trình duyệt thật, vượt qua lớp chặn
 scraper = cloudscraper.create_scraper(
     browser={
         'browser': 'chrome',
@@ -55,7 +54,8 @@ def download_chapter(url):
     soup = get_soup(url)
     if not soup: return None
     
-    content = soup.select_one(".chapter-content") or soup.select_one("#chapter-c")
+    # Tìm nội dung theo nhiều kiểu cấu trúc phổ biến
+    content = soup.select_one(".chapter-content") or soup.select_one("#chapter-c") or soup.select_one(".chapter-c")
     if not content: return None
     
     for tag in content.find_all(["script", "style", "div", "ins", "iframe"]):
@@ -67,7 +67,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url: return
     
-    status = await update.message.reply_text("⏳ Đang kết nối TruyenFull (Chế độ vượt tường lửa)...")
+    status = await update.message.reply_text("⏳ Đang kết nối TruyenFull (Quét danh sách chương)...")
     
     story_url = url[0]
     main_soup = get_soup(story_url)
@@ -75,32 +75,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không thể kết nối tới trang truyện. Web có thể đang chặn mạnh.")
         return
         
-    title_el = main_soup.select_one("h1")
+    title_el = main_soup.select_one("h1") or main_soup.select_one(".title")
     title = title_el.get_text().strip() if title_el else "Truyện"
     
     links = []
-    # Quét toàn bộ danh sách chương (Hỗ trợ phân trang nếu có)
-    base_url = story_url.split('?')[0].rstrip('/')
-    max_page = 1
-    for a in main_soup.select(".pagination a"):
-        txt = a.get_text().strip()
-        if txt.isdigit():
-            max_page = max(max_page, int(txt))
-            
-    for p in range(1, max_page + 1):
-        p_url = f"{base_url}/trang-{p}/" if p > 1 else base_url
-        soup = main_soup if p == 1 else get_soup(p_url)
-        if not soup: continue
-        
-        for a in soup.select("#list-chapter a"):
-            href = a.get('href', '')
-            if href:
-                full_url = href if href.startswith("http") else "https://truyenfull.live" + href
-                if not any(l['url'] == full_url for l in links):
-                    links.append({"name": a.get_text().strip(), "url": full_url})
+    
+    # THỬ NHIỀU CÁCH TÌM DANH SÁCH CHƯƠNG KHÁC NHAU ĐỂ KHÔNG BỊ SÓT
+    chapter_tags = main_soup.select("#list-chapter a, .list-chapter a, .chapter-list a")
+    
+    # Nếu không tìm thấy bằng các class thông thường, quét toàn bộ thẻ a có chứa từ 'chuong' trong link
+    if not chapter_tags:
+        chapter_tags = [a for a in main_soup.find_all("a", href=True) if "chuong-" in a['href'] or "hoi-" in a['href']]
+
+    for a in chapter_tags:
+        href = a.get('href', '')
+        if href:
+            # Lọc lấy domain gốc để ghép link chuẩn
+            domain = "https://" + story_url.split('/')[2]
+            full_url = href if href.startswith("http") else domain + href
+            text = a.get_text().strip()
+            if text and not any(l['url'] == full_url for l in links):
+                links.append({"name": text, "url": full_url})
             
     if not links:
-        await status.edit_text("❌ Không tìm thấy chương nào.")
+        await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn truyện.")
         return
         
     await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(links)} chương. Đang tải nội dung...")
@@ -125,8 +123,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
-        # Nghỉ nhẹ 0.4 giây để tránh bị web quét bot dồn dập
-        time.sleep(0.4)
+        time.sleep(0.3)
 
     if success_count == 0:
         await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
@@ -151,5 +148,5 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == "main" or __name__ == "__main__":
+if __name__ == "__main__":
     main()
