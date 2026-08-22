@@ -1,6 +1,7 @@
-python-telegram-bot
-beautifulsoup4
+python-telegram-bot>=20.0
 requests
+beautifulsoup4
+lxml
 EbookLib
 flask
-lxml
+nest_asyncio
