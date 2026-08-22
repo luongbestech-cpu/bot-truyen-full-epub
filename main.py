@@ -57,7 +57,7 @@ def fetch(url, timeout=REQUEST_TIMEOUT):
         response = session.get(url, timeout=timeout, allow_redirects=True)
         response.raise_for_status()
         return response
-    except Exception:
+    except Exception as e:
         return None
 
 def get_soup(url):
@@ -93,23 +93,20 @@ def extract_chapter_number(text):
 
 def get_chapter_name(a, href):
     span = a.select_one(".chapter-text")
-    name = clean_text(span.get_text(" ", strip=True)) if span else ""
-    if not name:
-        name = clean_text(a.get("title")) or clean_text(a.get_text(" ", strip=True))
-    
-    # Bắt số chương từ đường link nếu tên bị thiếu
-    num_match = re.search(r"/chuong[-_](\d+(?:[-_]\d+)?)[^/]*", href, flags=re.I)
-    num_str = num_match.group(1).replace("-", ".") if num_match else ""
-
-    # Nếu tên trống hoặc chỉ có mỗi chữ "Chương"
-    if not name or name.lower() in ["chương", "chuong"]:
-        return f"Chương {num_str}" if num_str else "Chương"
-    
-    # Nếu tên có nội dung nhưng chưa có chữ "Chương"
-    if num_str and not re.search(r"\d+", name):
-        return f"Chương {num_str}: {name}"
-        
-    return name
+    if span:
+        name = clean_text(span.get_text(" ", strip=True))
+        if name:
+            return name
+    title = clean_text(a.get("title"))
+    if title:
+        return title
+    text = clean_text(a.get_text(" ", strip=True))
+    if text:
+        return text
+    match = re.search(r"/chuong[-_](\d+(?:[-_]\d+)?)[^/]*", href, flags=re.I)
+    if match:
+        return "Chương " + match.group(1)
+    return "Chương"
 
 def is_chapter_link(text, href):
     combined = clean_text(text) + " " + (href or "")
@@ -275,7 +272,7 @@ def download_single_chapter(chapter_info):
     return str(content)
 
 # ============================================================
-# TELEGRAM BOT HANDLER
+# TELEGRAM BOT HANDLER (TỐI ƯU SONG SONG & CẬP NHẬT TIẾN ĐỘ)
 # ============================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -299,9 +296,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_chaps = len(chapters)
         await status.edit_text(f"📚 **{title}**\n\n✅ Tìm thấy {total_chaps} chương.\n🚀 Đang tải nội dung tốc độ cao...")
 
-        # Tải song song đa luồng
+        # Tải song song bằng ThreadPoolExecutor
         downloaded_contents = {}
         last_update_time = time.time()
+        
         loop = asyncio.get_event_loop()
         
         for i in range(0, total_chaps, CONCURRENT_DOWNLOADS):
@@ -314,7 +312,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if content:
                     downloaded_contents[chap_idx] = content
 
-            # Cập nhật phần trăm tiến độ
+            # Cập nhật tiến độ Telegram mỗi 4 giây
             if time.time() - last_update_time > 4 or (i + CONCURRENT_DOWNLOADS) >= total_chaps:
                 completed = min(i + CONCURRENT_DOWNLOADS, total_chaps)
                 percent = int((completed / total_chaps) * 100)
@@ -330,7 +328,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await status.edit_text(f"📚 **{title}**\n\n📦 Đang đóng gói file EPUB...")
 
-        # Tạo file EPUB
+        # Đóng gói EPUB
         book = epub.EpubBook()
         book.set_identifier("truyenfull-" + str(abs(hash(title))))
         book.set_title(title)
@@ -349,15 +347,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             content = downloaded_contents.get(index)
             if not content:
                 continue
-            
-            # Xử lý tên chương chuẩn xác
-            c_name = clean_text(chapter["name"])
-            num = chapter["number"]
-            num_str = str(int(num)) if float(num).is_integer() else str(num)
-            
-            if not c_name or c_name.lower() in ["chương", "chuong"]:
-                c_name = f"Chương {num_str}"
-
+            c_name = clean_text(chapter["name"]) or f"Chương {chapter['number']}"
             html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{c_name}</title><link rel='stylesheet' href='style.css'></head><body><h2>{c_name}</h2>{content}</body></html>"
             item = epub.EpubHtml(title=c_name, file_name=f"chapter_{index+1}.xhtml", lang="vi")
             item.content = html
