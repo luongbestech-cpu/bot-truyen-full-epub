@@ -31,7 +31,7 @@ from telegram.ext import (
 # Lấy từ GitHub Secrets
 # ============================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN_TRUYENFULL", "").strip()
 
 
 # ============================================================
