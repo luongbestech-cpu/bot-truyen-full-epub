@@ -11,15 +11,15 @@ from urllib.parse import urljoin, urldefrag
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# Lấy Token từ biến môi trường hoặc điền trực tiếp
+# Lấy Token từ biến môi trường Render của bạn
 BOT_TOKEN = os.environ.get("BOT_TOKEN_TRUYENFULL", "ĐIỀN_TOKEN_THẬT_VÀO_ĐÂY")
 
-# --- WEB SERVER GIẢ LẬP ĐỂ RENDER CHẠY 24/7 ---
+# --- WEB SERVER DÙNG CHO RENDER ---
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Bot TruyenFull đang hoạt động 24/7!"
+    return "Bot TruyenFull Engine đang hoạt động 24/7!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -44,15 +44,18 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 def get_chapter_name_smart(a, href):
+    """Trích xuất tên chương chính xác, không bao giờ để trơ trọi chữ 'Chương'"""
     title_attr = clean_text(a.get("title"))
     text_attr = clean_text(a.get_text(" ", strip=True))
     
+    # 1. Nếu text hoặc title có chứa số thì dùng luôn
     if title_attr and re.search(r"\d+", title_attr):
         return title_attr
 
     if text_attr and re.search(r"\d+", text_attr):
         return text_attr
 
+    # 2. Bắt số chương từ URL nếu text bị lỗi trơ trọi chữ "Chương"
     match = re.search(r"/chuong[-_](\d+(?:[-_]\d+)?)[^/]*", href, flags=re.I)
     if match:
         chap_num = match.group(1).replace("-", ".")
@@ -62,20 +65,8 @@ def get_chapter_name_smart(a, href):
 
     return text_attr or title_attr or "Chương"
 
-def get_max_page(soup):
-    max_page = 1
-    pagination = soup.select_one(".pagination") or soup.select_one("#pagination")
-    if pagination:
-        for a in pagination.find_all("a", href=True):
-            href = a.get("href", "")
-            match = re.search(r"trang-(\d+)", href, flags=re.I)
-            if match:
-                page_num = int(match.group(1))
-                if page_num > max_page:
-                    max_page = page_num
-    return max_page
-
-def get_all_chapters_correct(story_url):
+def get_all_chapters_full(story_url):
+    """Lấy 100% danh sách chương, không bị kẹt ở 50 chương"""
     chapters = []
     seen_urls = set()
     base_url = normalize_url(story_url)
@@ -85,44 +76,79 @@ def get_all_chapters_correct(story_url):
         if res.status_code != 200:
             return []
 
-        first_soup = BeautifulSoup(res.text, 'lxml')
-        total_pages = get_max_page(first_soup)
+        soup = BeautifulSoup(res.text, 'lxml')
+        
+        # Thử phương pháp 1: Lấy thông qua AJAX nếu có truyen-id
+        story_id_input = soup.find('input', id='truyen-id')
+        if story_id_input:
+            story_id = story_id_input.get('value')
+            ajax_first = session.get(f"{base_url}/ajax-list-chap/?truyen_id={story_id}&page=1", timeout=10)
+            if ajax_first.status_code == 200:
+                ajax_soup = BeautifulSoup(ajax_first.text, 'lxml')
+                
+                # Tìm trang tối đa từ AJAX
+                max_page = 1
+                pagination = ajax_soup.select_one(".pagination") or ajax_soup.select_one("#pagination")
+                if pagination:
+                    for a in pagination.find_all("a", href=True):
+                        match = re.search(r"trang-(\d+)|page=(\d+)", a.get("href", ""), flags=re.I)
+                        if match:
+                            p = int(match.group(1) or match.group(2))
+                            if p > max_page:
+                                max_page = p
 
-        for page in range(1, total_pages + 1):
+                # Lặp qua toàn bộ các trang AJAX
+                for p in range(1, max_page + 1):
+                    r = session.get(f"{base_url}/ajax-list-chap/?truyen_id={story_id}&page={p}", timeout=10)
+                    if r.status_code == 200:
+                        p_soup = BeautifulSoup(r.text, 'lxml')
+                        for a in p_soup.find_all('a', href=True):
+                            href = normalize_url(urljoin(base_url, a.get('href')))
+                            if href and href not in seen_urls and "/chuong-" in href:
+                                seen_urls.add(href)
+                                title = get_chapter_name_smart(a, href)
+                                chapters.append({'name': title, 'url': href})
+                
+                if chapters:
+                    return format_final_chapters(chapters)
+
+        # Phương pháp 2: Quét phân trang HTML trực tiếp (Fallback)
+        max_page = 1
+        pagination = soup.select_one(".pagination") or soup.select_one("#pagination")
+        if pagination:
+            for a in pagination.find_all("a", href=True):
+                match = re.search(r"trang-(\d+)", a.get("href", ""), flags=re.I)
+                if match:
+                    p = int(match.group(1))
+                    if p > max_page:
+                        max_page = p
+
+        for page in range(1, max_page + 1):
             page_url = base_url if page == 1 else f"{base_url}/trang-{page}/"
-            
-            try:
-                res_page = session.get(page_url, timeout=10)
-                if res_page.status_code != 200:
-                    continue
-
-                soup = BeautifulSoup(res_page.text, 'lxml')
-                chapter_list = soup.find_all('ul', class_='list-chapter')
-
-                for ul in chapter_list:
+            res_page = session.get(page_url, timeout=10)
+            if res_page.status_code == 200:
+                p_soup = BeautifulSoup(res_page.text, 'lxml')
+                for ul in p_soup.find_all('ul', class_='list-chapter'):
                     for a in ul.find_all('a', href=True):
-                        href = urljoin(page_url, a.get('href'))
-                        href = normalize_url(href)
-
+                        href = normalize_url(urljoin(page_url, a.get('href')))
                         if href and href not in seen_urls:
                             seen_urls.add(href)
-                            final_title = get_chapter_name_smart(a, href)
-                            chapters.append({'name': final_title, 'url': href})
+                            title = get_chapter_name_smart(a, href)
+                            chapters.append({'name': title, 'url': href})
 
-            except Exception:
-                continue
+    except Exception as e:
+        print("Lỗi quét danh sách chương:", e)
 
-    except Exception:
-        pass
+    return format_final_chapters(chapters)
 
-    formatted_chapters = []
+def format_final_chapters(chapters):
+    formatted = []
     for idx, chap in enumerate(chapters, 1):
         t = chap['name']
         if t.strip().lower() == "chương":
             t = f"Chương {idx}"
-        formatted_chapters.append({'name': t, 'url': chap['url']})
-
-    return formatted_chapters
+        formatted.append({'name': t, 'url': chap['url']})
+    return formatted
 
 def get_cover_image(soup):
     try:
@@ -163,10 +189,8 @@ def create_epub(story_title, chapters, cover_bytes, output_filename):
     if cover_bytes:
         book.set_cover("cover.jpg", cover_bytes)
 
-    fetched_results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(fetch_single_chapter, chapters))
-        fetched_results = results
+        fetched_results = list(executor.map(fetch_single_chapter, chapters))
 
     epub_chapters = []
     spine = ['nav']
@@ -201,7 +225,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Vui lòng gửi link trang chủ của bộ truyện trên TruyenFull!")
         return
 
-    msg = await update.message.reply_text("🔍 Đang quét danh sách & kiểm tra tiêu đề chương...")
+    msg = await update.message.reply_text("🔍 Đang quét toàn bộ danh sách chương...")
 
     try:
         res = session.get(url, timeout=10)
@@ -211,13 +235,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         story_title = title_tag.text.strip() if title_tag else "Truyện TruyenFull"
         cover_bytes = get_cover_image(soup)
 
-        chapters = get_all_chapters_correct(url)
+        chapters = get_all_chapters_full(url)
         if not chapters:
             await msg.edit_text("❌ Không tìm thấy chương nào!")
             return
 
         total = len(chapters)
-        await msg.edit_text(f"⚡ Tìm thấy TỔNG CỘNG {total} chương!\n🚀 Đang cào đa luồng & đóng gói file ePub...")
+        await msg.edit_text(f"⚡ Đã quét xong! Tìm thấy TỔNG CỘNG {total} chương.\n🚀 Đang cào dữ liệu & tạo file EPUB...")
 
         clean_title = re.sub(r'[\\/*?:"<>|]', "", story_title)
         file_name = f"{clean_title}.epub"
@@ -238,12 +262,12 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
     if not BOT_TOKEN or "ĐIỀN_TOKEN" in BOT_TOKEN:
-        print("❌ LỖI: Bạn chưa cài đặt BOT_TOKEN!")
+        print("❌ LỖI: Bạn chưa cài đặt BOT_TOKEN_TRUYENFULL!")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Bot TruyenFull đang khởi chạy...")
+    print("Bot TruyenFull đang hoạt động...")
     app.run_polling()
 
 if __name__ == '__main__':
