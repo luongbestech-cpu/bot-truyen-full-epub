@@ -31,7 +31,7 @@ def run_web_server():
 # ============================================================
 # CẤU HÌNH BOT & SCRAPER
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("BOT_TOKEN")
 
 # Sử dụng cloudscraper để giả lập trình duyệt thật, vượt qua lớp chặn
 scraper = cloudscraper.create_scraper(
