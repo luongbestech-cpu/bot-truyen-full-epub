@@ -1,7 +1,6 @@
-python-telegram-bot>=20.0
+python-telegram-bot==20.8
+httpx==0.27.0
 requests
 beautifulsoup4
 lxml
 EbookLib
-flask
-nest_asyncio
