@@ -12,7 +12,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # Lấy Token từ biến môi trường hoặc điền trực tiếp
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ĐIỀN_TOKEN_THẬT_VÀO_ĐÂY")
+BOT_TOKEN = os.environ.get("BOT_TOKEN_TRUYENFULL", "ĐIỀN_TOKEN_THẬT_VÀO_ĐÂY")
 
 # --- WEB SERVER GIẢ LẬP ĐỂ RENDER CHẠY 24/7 ---
 app_web = Flask(__name__)
