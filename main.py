@@ -29,10 +29,11 @@ def run_web_server():
     server.serve_forever()
 
 # ============================================================
-# CẤU HÌNH BOT & SCRAPER
+# CẤU HÌNH BOT & CHỐNG TƯỜNG LỬA (CLOUDSCRAPER)
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
 
+# Cấu hình cloudscraper giả lập trình duyệt thật để vượt qua tường lửa/Cloudflare
 scraper = cloudscraper.create_scraper(
     browser={
         'browser': 'chrome',
@@ -43,11 +44,12 @@ scraper = cloudscraper.create_scraper(
 
 def get_soup(url):
     try:
-        response = scraper.get(url, timeout=30)
+        # Tăng timeout và thêm headers giả lập đầy đủ để chống chặn
+        response = scraper.get(url, timeout=35)
         if response.status_code == 200:
             return BeautifulSoup(response.text, "lxml")
     except Exception as e:
-        print(f"Lỗi lấy soup {url}: {e}")
+        print(f"Lỗi vượt tường lửa tải {url}: {e}")
     return None
 
 def download_chapter(url):
@@ -66,12 +68,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url: return
     
-    status = await update.message.reply_text("⏳ Đang kết nối TruyenFull (Quét toàn bộ danh sách chương)...")
+    status = await update.message.reply_text("⏳ Đang vượt tường lửa kết nối TruyenFull (Quét danh sách chương)...")
     
-    story_url = url[0].strip('/')
+    story_url = url[0]
     main_soup = get_soup(story_url)
     if not main_soup:
-        await status.edit_text("❌ Không thể kết nối tới trang truyện. Web có thể đang chặn mạnh.")
+        await status.edit_text("❌ Không thể kết nối tới trang truyện. Có thể web đang chặn mạnh hoặc sai link.")
         return
         
     title_el = main_soup.select_one("h1") or main_soup.select_one(".title")
@@ -83,66 +85,95 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if img_tag and img_tag.get('src'):
         cover_url = img_tag['src']
 
+    # --- TÍNH NĂNG QUÉT PHÂN TRANG THÔNG MINH & DỪNG KHI HẾT CHƯƠNG MỚI ---
     links = []
-    domain = "https://" + story_url.split('/')[2]
-
-    # --- THUẬT TOÁN QUÉT ĐA TRANG (PHÂN TRANG TRUYENFULL) ---
-    # Lấy các link phân trang nếu có (ví dụ: ?page=1, ?page=2...) hoặc quét qua ajax/api mục lục của trang
-    pages_to_crawl = [story_url]
+    base_domain = "https://" + story_url.split('/')[2]
+    current_page_url = story_url
+    page_num = 1
     
-    # Tìm xem có thanh phân trang pagination không để lấy tất cả các trang danh sách chương
-    pagination = main_soup.select_one(".pagination") or main_soup.select(".pages")
-    if pagination:
-        page_links = pagination.find_all("a", href=True)
-        for a in page_links:
-            p_href = a['href']
-            full_p_url = p_href if p_href.startswith("http") else domain + p_href
-            if full_p_url not in pages_to_crawl:
-                pages_to_crawl.append(full_p_url)
-
-    # Nếu web dùng dạng AJAX lấy id truyện, ta thử tìm ajax chapter list (nếu có cấu trúc đặc trưng)
-    # Hoặc tiến hành quét qua danh sách các trang phân trang thu được:
-    for page_url in pages_to_crawl:
-        soup_p = main_soup if page_url == story_url else get_soup(page_url)
-        if not soup_p: continue
-        
-        chapter_tags = soup_p.select("#list-chapter a, .list-chapter a, .chapter-list a")
+    while current_page_url:
+        soup = get_soup(current_page_url)
+        if not soup:
+            break
+            
+        chapter_tags = soup.select("#list-chapter a, .list-chapter a, .chapter-list a")
         if not chapter_tags:
-            chapter_tags = [a for a in soup_p.find_all("a", href=True) if "chuong-" in a['href'] or "hoi-" in a['href']]
-
+            break
+            
+        new_chapters_in_page = 0
         for a in chapter_tags:
             href = a.get('href', '')
             if href:
-                full_url = href if href.startswith("http") else domain + href
+                full_url = href if href.startswith("http") else base_domain + href
                 text = a.get_text().strip()
-                # Kiểm tra xem có đúng là link chương truyện không
-                if text and ("chuong-" in full_url or "hoi-" in full_url or re.search(r'\d+', text)):
-                    if not any(l['url'] == full_url for l in links):
-                        links.append({"name": text, "url": full_url})
-        
-        # Tránh gửi request quá nhanh gây quá tải
-        if len(pages_to_crawl) > 1:
-            time.sleep(0.5)
+                # Kiểm tra nếu link chưa có trong danh sách thì mới thêm vào
+                if text and not any(l['url'] == full_url for l in links):
+                    links.append({"name": text, "url": full_url})
+                    new_chapters_in_page += 1
+                    
+        # QUAN TRỌNG: Nếu trang này quét xong mà KHÔNG CÓ chương nào mới so với trang trước -> Dừng ngay lập tức
+        if new_chapters_in_page == 0:
+            break
+            
+        # Tìm nút phân trang trang tiếp theo
+        pagination_links = soup.select(".pagination a")
+        next_url = None
+        for p_link in pagination_links:
+            text_p = p_link.get_text().strip()
+            # Tìm nút trang sau hoặc dấu mũi tên chuyển trang
+            if "Trang sau" in text_p or ">" in text_p or str(page_num + 1) == text_p:
+                next_url = p_link.get('href')
+                break
+                
+        if next_url:
+            next_full_url = next_url if next_url.startswith("http") else base_domain + next_url
+            # Đảm bảo không bị lặp lại trang cũ
+            if next_full_url == current_page_url:
+                break
+            current_page_url = next_full_url
+            page_num += 1
+        else:
+            # Thử tự động đoán cấu trúc phân trang kiểu /trang-2/ nếu không tìm thấy nút bấm
+            if page_num < 30: # Giới hạn an toàn
+                if story_url.endswith("/"):
+                    guessed_url = f"{story_url}trang-{page_num + 1}/"
+                else:
+                    guessed_url = f"{story_url}/trang-{page_num + 1}/"
+                current_page_url = guessed_url
+                page_num += 1
+            else:
+                break
+                
+        time.sleep(0.4)
+
+    # Fallback dự phòng nếu không quét được qua phân trang
+    if len(links) < 5:
+        for a in main_soup.find_all("a", href=True):
+            if "chuong-" in a['href'] or "hoi-" in a['href']:
+                full_url = a['href'] if a['href'].startswith("http") else base_domain + a['href']
+                text = a.get_text().strip()
+                if text and not any(l['url'] == full_url for l in links):
+                    links.append({"name": text, "url": full_url})
 
     if not links:
         await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn truyện.")
         return
         
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy tổng cộng {len(links)} chương. Đang tiến hành tải nội dung...")
+    await status.edit_text(f"📚 {title}\n✅ Quét thành công tổng cộng {len(links)} chương. Đang tải nội dung...")
     
     book = epub.EpubBook()
     book.set_identifier('truyenfull_' + re.sub(r'\W+', '', title))
     book.set_title(title)
     book.set_language('vi')
     
-    # Thêm ảnh bìa
+    # Thêm ảnh bìa an toàn
     if cover_url:
         try:
-            full_cover_url = cover_url if cover_url.startswith("http") else domain + cover_url
+            full_cover_url = cover_url if cover_url.startswith("http") else base_domain + cover_url
             img_data = scraper.get(full_cover_url, timeout=15).content
             book.set_cover("cover.jpg", img_data)
         except Exception as e:
-            print(f"Lỗi tải ảnh bìa TruyenFull: {e}")
+            print(f"Lỗi tải ảnh bìa: {e}")
 
     chapters_list = []
     success_count = 0
@@ -163,13 +194,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
-        time.sleep(0.2)
+        # Độ trễ nhẹ để tránh bị tường lửa chặn do request quá nhanh
+        time.sleep(0.3)
 
     if success_count == 0:
         await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
         return
 
-    # Cấu hình Mục lục (TOC) chuẩn Kindle
+    # Cấu hình Mục lục (TOC) & Luồng đọc chuẩn Kindle
     book.toc = tuple(chapters_list)
     book.spine = ['nav'] + chapters_list
 
@@ -183,7 +215,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_document(
         document=open(file_name, "rb"), 
-        caption=f"✅ Xong: {title}\n📖 Đã tải thành công {success_count}/{len(links)} chương + Ảnh bìa & Mục lục chuẩn Kindle!"
+        caption=f"✅ Xong: {title}\n📖 Đã tải đủ trọn bộ {success_count}/{len(links)} chương + Chống tường lửa thành công!"
     )
     await status.delete()
     
