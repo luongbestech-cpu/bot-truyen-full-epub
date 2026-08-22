@@ -12,19 +12,16 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 # ============================================================
-# 🔑 LẤY TOKEN TỪ ENVIRONMENT VARIABLE TRÊN RENDER
+# 🔑 TOKEN & WEB SERVER DUMMY
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("bot_token_truyenfull") or os.getenv("BOT_TOKEN")
 
-# ============================================================
-# 🌐 DUMMY WEB SERVER ĐỂ RENDER BẮT PORT (10000)
-# ============================================================
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write("Bot TruyenFull Colab-Engine đang hoạt động 24/7!".encode('utf-8'))
+        self.wfile.write("Bot Truyen Multi-Source đang chạy!".encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -32,379 +29,266 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    print(f"🌐 Web Server đang lắng nghe Port {port}...")
     server.serve_forever()
 
 # ============================================================
-# CẤU HÌNH CÀO TRUYỆN TOÀN DIỆN
+# CẤU HÌNH MẠNG
 # ============================================================
-REQUEST_TIMEOUT = 10
-MAX_PAGES = 2000
-CONCURRENT_DOWNLOADS = 5  # Số chương tải song song cùng lúc
+REQUEST_TIMEOUT = 12
+CONCURRENT_DOWNLOADS = 5
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://truyenfull.vn/",
 }
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
-def fetch(url, timeout=REQUEST_TIMEOUT):
+def fetch(url):
     try:
-        response = session.get(url, timeout=timeout, allow_redirects=True)
-        response.raise_for_status()
-        return response
+        res = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        res.raise_for_status()
+        return res
     except Exception:
         return None
 
 def get_soup(url):
-    response = fetch(url)
-    if response is None:
-        return None
-    return BeautifulSoup(response.text, "lxml")
-
-def normalize_url(url):
-    if not url:
-        return ""
-    return urldefrag(url)[0].rstrip("/")
+    res = fetch(url)
+    return BeautifulSoup(res.text, "lxml") if res else None
 
 def clean_text(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
-def extract_chapter_number(text):
-    text = clean_text(text)
-    patterns = [
-        r"(?:chương|chuong|chapter|chap)\s*(\d+)(?:\s*[-–]\s*(\d+))?",
-        r"/chuong[-_](\d+)(?:[-_](\d+))?",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.I)
-        if not match:
-            continue
-        first = int(match.group(1))
-        second = match.group(2)
-        if second:
-            return first + int(second) / 10
-        return float(first)
-    return None
-
-def get_chapter_name(a, href):
-    span = a.select_one(".chapter-text")
-    name = clean_text(span.get_text(" ", strip=True)) if span else ""
-    if not name:
-        name = clean_text(a.get("title")) or clean_text(a.get_text(" ", strip=True))
-    
-    # Bắt số chương từ đường link nếu tên bị thiếu
-    num_match = re.search(r"/chuong[-_](\d+(?:[-_]\d+)?)[^/]*", href, flags=re.I)
-    num_str = num_match.group(1).replace("-", ".") if num_match else ""
-
-    # Nếu tên trống hoặc chỉ có mỗi chữ "Chương"
-    if not name or name.lower() in ["chương", "chuong"]:
-        return f"Chương {num_str}" if num_str else "Chương"
-    
-    # Nếu tên có nội dung nhưng chưa có chữ "Chương"
-    if num_str and not re.search(r"\d+", name):
-        return f"Chương {num_str}: {name}"
-        
-    return name
-
-def is_chapter_link(text, href):
-    combined = clean_text(text) + " " + (href or "")
-    if re.search(r"(?:chương|chuong|chapter|chap)\s*\d+", combined, flags=re.I):
-        return True
-    if re.search(r"/chuong[-_]\d+", href or "", flags=re.I):
-        return True
-    return False
-
-def parse_chapters(page_url, soup):
-    result = {}
-    if soup is None:
-        return result
-    containers = soup.select("#list-chapter") or soup.select(".list-chapter") or [soup]
-    for container in containers:
-        for a in container.find_all("a", href=True):
-            href = normalize_url(urljoin(page_url, a.get("href")))
-            if not href:
-                continue
-            name = get_chapter_name(a, href)
-            if not is_chapter_link(name, href):
-                continue
-            number = extract_chapter_number(name + " " + href)
-            if number is None:
-                continue
-            result[href] = {"name": name, "url": href, "number": number}
-    return result
-
-def get_page_number(url):
-    patterns = [r"/page[-/](\d+)", r"/trang[-_](\d+)", r"[?&]page=(\d+)"]
-    for pattern in patterns:
-        match = re.search(pattern, url, flags=re.I)
-        if match:
-            return int(match.group(1))
-    return None
-
-def find_pagination_links(page_url, soup):
-    pages = []
-    if soup is None:
-        return pages
-    seen = set()
-    nodes = soup.select(".pagination") or soup.select("ul.pagination") or [soup]
-    for node in nodes:
-        for a in node.find_all("a", href=True):
-            href = normalize_url(urljoin(page_url, a.get("href")))
-            if not href:
-                continue
-            text = clean_text(a.get_text(" ", strip=True)).lower()
-            if is_chapter_link(text, href):
-                continue
-            low = href.lower()
-            is_page = False
-            if re.search(r"/(?:page|trang)[-_/]?\d+", low) or "[?&]page=\d+" in low:
-                is_page = True
-            if text.isdigit() and 1 <= int(text) <= MAX_PAGES:
-                is_page = True
-            if text in {"next", "tiếp", "trang sau", "sau", "»", "›", "→"}:
-                is_page = True
-            if is_page and href not in seen:
-                seen.add(href)
-                pages.append(href)
-    return pages
-
-def find_next_page(current_url, soup, visited):
-    links = find_pagination_links(current_url, soup)
-    candidates = []
-    for link in links:
-        if link in visited:
-            continue
-        number = get_page_number(link)
-        if number is not None:
-            candidates.append((number, link))
-    if candidates:
-        candidates.sort(key=lambda x: x[0])
-        current_number = get_page_number(current_url) or 1
-        for number, link in candidates:
-            if number == current_number + 1:
-                return link
-        for number, link in candidates:
-            if number > current_number:
-                return link
-        return None
-    for link in links:
-        if link not in visited:
-            return link
-    return None
-
-def get_story_info(story_url):
+# ============================================================
+# BỘ BẮT NỘI DUNG TƯƠNG THÍCH ĐA TRANG
+# ============================================================
+def extract_story_info(story_url):
     soup = get_soup(story_url)
-    if soup is None:
-        raise RuntimeError("Không truy cập được trang truyện.")
+    if not soup:
+        raise RuntimeError("Không thể kết nối đến trang truyện.")
+    
+    # Tiêu đề
     title = ""
-    for selector in ["h1.title", "h1", "meta[property='og:title']", "title"]:
-        element = soup.select_one(selector)
-        if not element:
-            continue
-        title = clean_text(element.get("content", "")) if element.name == "meta" else clean_text(element.get_text(" ", strip=True))
-        if title:
-            break
+    for selector in ["h1.title", "h1", ".book-info h1", "meta[property='og:title']"]:
+        el = soup.select_one(selector)
+        if el:
+            title = clean_text(el.get("content", "")) if el.name == "meta" else clean_text(el.get_text())
+            if title: break
     title = title or "Truyện"
+
+    # Ảnh bìa
     cover_url = None
-    for selector in ["meta[property='og:image']", ".book img", ".info img"]:
-        element = soup.select_one(selector)
-        if not element:
-            continue
-        src = element.get("content") if element.name == "meta" else (element.get("src") or element.get("data-src"))
-        if src:
-            cover_url = urljoin(story_url, src)
-            break
+    for selector in ["meta[property='og:image']", ".book-info img", ".info-holder img", ".book-img img"]:
+        el = soup.select_one(selector)
+        if el:
+            src = el.get("content") if el.name == "meta" else (el.get("src") or el.get("data-src"))
+            if src:
+                cover_url = urljoin(story_url, src)
+                break
+
     return title, cover_url, soup
 
-def collect_chapters(story_url):
-    story_url = normalize_url(story_url)
-    current_url = story_url
-    visited = set()
-    all_chapters = {}
-    page_count = 0
-    while True:
-        if current_url in visited or page_count >= MAX_PAGES:
-            break
-        visited.add(current_url)
-        page_count += 1
-        soup = get_soup(current_url)
-        if soup is None:
-            break
-        found = parse_chapters(current_url, soup)
-        before = len(all_chapters)
-        for url, item in found.items():
-            if url not in all_chapters:
-                all_chapters[url] = item
-        new_count = len(all_chapters) - before
-        if new_count == 0:
-            break
-        next_url = find_next_page(current_url, soup, visited)
-        if not next_url:
-            break
-        current_url = next_url
-        time.sleep(0.1)
-    chapters = list(all_chapters.values())
-    chapters.sort(key=lambda x: x["number"])
-    unique = {}
-    for item in chapters:
-        if item["number"] not in unique:
-            unique[item["number"]] = item
-    chapters = sorted(list(unique.values()), key=lambda x: x["number"])
+def parse_all_chapters(story_url, main_soup):
+    chapters = []
+    seen_urls = set()
+
+    # 1. TRUYỆN FULL
+    if "truyenfull" in story_url:
+        current_url = urldefrag(story_url)[0].rstrip("/")
+        visited_pages = set()
+        while current_url and current_url not in visited_pages:
+            visited_pages.add(current_url)
+            soup = get_soup(current_url) if current_url != story_url else main_soup
+            if not soup: break
+            
+            for a in soup.select("#list-chapter a, .list-chapter a"):
+                href = urljoin(current_url, a.get("href", ""))
+                if href and href not in seen_urls:
+                    seen_urls.add(href)
+                    name = clean_text(a.get_text())
+                    chapters.append({"name": name, "url": href})
+            
+            # Tìm trang kế tiếp
+            next_a = soup.select_one(".pagination .next a, .pagination a[links-next]")
+            current_url = urljoin(current_url, next_a.get("href")) if next_a and next_a.get("href") else None
+
+    # 2. TÀNG THƯ VIỆN
+    elif "tangthuvien" in story_url:
+        for a in main_soup.select(".story-chap-list a, #list-chap a"):
+            href = urljoin(story_url, a.get("href", ""))
+            if href and href not in seen_urls:
+                seen_urls.add(href)
+                chapters.append({"name": clean_text(a.get_text()), "url": href})
+
+    # 3. MÊ TRUYỆN CHỮ / DẠNG KHÁC (GENERIC)
+    else:
+        for a in main_soup.select("a[href*='/chuong']"):
+            href = urljoin(story_url, a.get("href", ""))
+            if href and href not in seen_urls:
+                seen_urls.add(href)
+                chapters.append({"name": clean_text(a.get_text()), "url": href})
+
     return chapters
 
-def download_single_chapter(chapter_info):
-    url = chapter_info["url"]
-    soup = get_soup(url)
-    if soup is None:
-        return None
-    content = None
-    for selector in [".chapter-c", "#chapter-c", ".chapter-content", ".reading-content"]:
-        element = soup.select_one(selector)
-        if element and len(clean_text(element.get_text(" ", strip=True))) > 50:
-            content = element
+def download_chapter_content(chap_info):
+    soup = get_soup(chap_info["url"])
+    if not soup: return None
+    
+    content_el = None
+    # Selector nội dung theo từng trang
+    for selector in [".chapter-c", "#chapter-c", ".chap-content", "#chap-content", ".reading-content", ".content-body"]:
+        el = soup.select_one(selector)
+        if el and len(clean_text(el.get_text())) > 50:
+            content_el = el
             break
-    if content is None:
-        return None
-    for tag in content.find_all(["script", "style", "iframe", "form", "noscript", "nav"]):
+            
+    if not content_el: return None
+    
+    # Dọn dẹp rác quảng cáo
+    for tag in content_el.find_all(["script", "style", "iframe", "form", "ins", "a"]):
         tag.decompose()
-    return str(content)
+        
+    return str(content_el)
 
 # ============================================================
 # TELEGRAM BOT HANDLER
 # ============================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
+    if not update.message or not update.message.text: return
     urls = re.findall(r"https?://[^\s]+", update.message.text)
     if not urls:
-        await update.message.reply_text("❌ Hãy gửi link truyện hợp lệ nhé.")
+        await update.message.reply_text("❌ Vui lòng gửi một đường link truyện hợp lệ!")
         return
+
     story_url = urls[0]
-    status = await update.message.reply_text("⏳ Đã nhận link. Đang kiểm tra truyện...")
-    
+    status = await update.message.reply_text("⏳ Đang kết nối tới trang truyện...")
+
     try:
-        title, cover_url, _ = await asyncio.to_thread(get_story_info, story_url)
+        title, cover_url, main_soup = await asyncio.to_thread(extract_story_info, story_url)
         await status.edit_text(f"📚 **{title}**\n\n🔎 Đang quét danh sách chương...")
-        
-        chapters = await asyncio.to_thread(collect_chapters, story_url)
+
+        chapters = await asyncio.to_thread(parse_all_chapters, story_url, main_soup)
         if not chapters:
-            await status.edit_text(f"📚 **{title}**\n\n❌ Không quét được danh sách chương.")
+            await status.edit_text("❌ Không lấy được danh sách chương. Vui lòng kiểm tra lại link.")
             return
 
-        total_chaps = len(chapters)
-        await status.edit_text(f"📚 **{title}**\n\n✅ Tìm thấy {total_chaps} chương.\n🚀 Đang tải nội dung tốc độ cao...")
+        total = len(chapters)
+        await status.edit_text(f"📚 **{title}**\n✅ Tìm thấy {total} chương.\n🚀 Đang tải dữ liệu chuẩn Kindle...")
 
-        # Tải song song đa luồng
-        downloaded_contents = {}
-        last_update_time = time.time()
+        downloaded_data = {}
         loop = asyncio.get_event_loop()
-        
-        for i in range(0, total_chaps, CONCURRENT_DOWNLOADS):
+        last_update = time.time()
+
+        for i in range(0, total, CONCURRENT_DOWNLOADS):
             batch = chapters[i:i + CONCURRENT_DOWNLOADS]
-            tasks = [loop.run_in_executor(None, download_single_chapter, c) for c in batch]
+            tasks = [loop.run_in_executor(None, download_chapter_content, c) for c in batch]
             results = await asyncio.gather(*tasks)
-            
-            for idx, content in enumerate(results):
-                chap_idx = i + idx
-                if content:
-                    downloaded_contents[chap_idx] = content
 
-            # Cập nhật phần trăm tiến độ
-            if time.time() - last_update_time > 4 or (i + CONCURRENT_DOWNLOADS) >= total_chaps:
-                completed = min(i + CONCURRENT_DOWNLOADS, total_chaps)
-                percent = int((completed / total_chaps) * 100)
+            for idx, res in enumerate(results):
+                if res: downloaded_data[i + idx] = res
+
+            if time.time() - last_update > 4 or (i + CONCURRENT_DOWNLOADS) >= total:
+                done = min(i + CONCURRENT_DOWNLOADS, total)
+                pct = int((done / total) * 100)
                 try:
-                    await status.edit_text(
-                        f"📚 **{title}**\n\n"
-                        f"⏳ Đang tải: {completed}/{total_chaps} chương ({percent}%)\n"
-                        f"████████▒▒ {percent}%"
-                    )
-                except Exception:
-                    pass
-                last_update_time = time.time()
+                    await status.edit_text(f"📚 **{title}**\n⏳ Tiến độ: {done}/{total} chương ({pct}%)\n████████▒▒ {pct}%")
+                except Exception: pass
+                last_update = time.time()
 
-        await status.edit_text(f"📚 **{title}**\n\n📦 Đang đóng gói file EPUB...")
+        await status.edit_text(f"📚 **{title}**\n📦 Đang tối ưu định dạng EPUB cho Kindle...")
 
-        # Tạo file EPUB
+        # ============================================================
+        # TẠO FILE EPUB ĐÃ TỐI ƯU CHO KINDLE
+        # ============================================================
         book = epub.EpubBook()
-        book.set_identifier("truyenfull-" + str(abs(hash(title))))
+        book.set_identifier("kindle-epub-" + str(abs(hash(title))))
         book.set_title(title)
         book.set_language("vi")
+
         if cover_url:
-            res = await asyncio.to_thread(fetch, cover_url)
-            if res and len(res.content) > 1000:
-                book.set_cover("cover.jpg", res.content)
-                
-        css = epub.EpubItem(uid="style", file_name="style.css", media_type="text/css", content="body{font-family:sans-serif;line-height:1.8;margin:5%;}h2{text-align:center;}p{text-align:justify;}")
-        book.add_item(css)
-        epub_chapters = []
+            c_res = await asyncio.to_thread(fetch, cover_url)
+            if c_res and len(c_res.content) > 1000:
+                book.set_cover("cover.jpg", c_res.content)
+
+        # CSS chuyên dụng cho màn hình E-Ink Kindle
+        kindle_css = """
+            @page { margin: 8pt; }
+            body {
+                font-family: "Bookerly", "Charis SIL", "Georgia", serif;
+                line-height: 1.6;
+                text-align: justify;
+                margin: 0;
+                padding: 0;
+            }
+            h2 {
+                text-align: center;
+                font-size: 1.3em;
+                font-weight: bold;
+                margin-top: 1.2em;
+                margin-bottom: 1.2em;
+            }
+            p {
+                text-indent: 1.5em;
+                margin-top: 0;
+                margin-bottom: 0.4em;
+            }
+        """
+        css_item = epub.EpubItem(uid="style", file_name="style.css", media_type="text/css", content=kindle_css)
+        book.add_item(css_item)
+
+        epub_chaps = []
         spine = ["nav"]
 
-        for index, chapter in enumerate(chapters):
-            content = downloaded_contents.get(index)
-            if not content:
-                continue
-            
-            # Xử lý tên chương chuẩn xác
-            c_name = clean_text(chapter["name"])
-            num = chapter["number"]
-            num_str = str(int(num)) if float(num).is_integer() else str(num)
-            
-            if not c_name or c_name.lower() in ["chương", "chuong"]:
-                c_name = f"Chương {num_str}"
+        for idx, chap in enumerate(chapters):
+            html_content = downloaded_data.get(idx)
+            if not html_content: continue
 
-            html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{c_name}</title><link rel='stylesheet' href='style.css'></head><body><h2>{c_name}</h2>{content}</body></html>"
-            item = epub.EpubHtml(title=c_name, file_name=f"chapter_{index+1}.xhtml", lang="vi")
-            item.content = html
-            item.add_item(css)
+            c_name = chap["name"]
+            if not re.search(r"\d+", c_name):
+                c_name = f"Chương {idx + 1}: {c_name}"
+
+            doc_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{c_name}</title><link rel='stylesheet' href='style.css'></head><body><h2>{c_name}</h2>{html_content}</body></html>"
+            
+            item = epub.EpubHtml(title=c_name, file_name=f"chap_{idx+1}.xhtml", lang="vi")
+            item.content = doc_html
+            item.add_item(css_item)
             book.add_item(item)
-            epub_chapters.append(item)
+            epub_chaps.append(item)
             spine.append(item)
 
-        book.toc = tuple(epub_chapters)
+        book.toc = tuple(epub_chaps)
         book.spine = spine
         book.add_item(epub.EpubNcx())
         book.add_item(epub.EpubNav())
-        
-        filename = (re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen") + ".epub"
-        await asyncio.to_thread(epub.write_epub, filename, book)
 
-        await status.edit_text(f"📚 **{title}**\n\n✅ Tải thành công {len(epub_chapters)}/{total_chaps} chương!\n📤 Đang gửi file...")
-        
-        with open(filename, "rb") as f:
+        file_out = (re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen_Kindle") + ".epub"
+        await asyncio.to_thread(epub.write_epub, file_out, book)
+
+        await status.edit_text(f"📚 **{title}**\n✅ Tải xong {len(epub_chaps)}/{total} chương.\n📤 Đang gửi file EPUB...")
+
+        with open(file_out, "rb") as f:
             await update.message.reply_document(
-                document=f, 
-                filename=os.path.basename(filename), 
-                caption=f"📚 {title}\n📖 {len(epub_chapters)} chương\n✅ EPUB hoàn tất!"
+                document=f,
+                filename=os.path.basename(file_out),
+                caption=f"📖 {title}\n✅ File EPUB đã tối ưu chuẩn Kindle!\n👉 Dùng amazon.com/sendtokindle để gửi vào máy."
             )
         await status.delete()
-        if os.path.exists(filename):
-            os.remove(filename)
+        if os.path.exists(file_out): os.remove(file_out)
 
     except Exception as e:
-        print(f"❌ Lỗi: {e}")
-        try:
-            await status.edit_text(f"❌ Có lỗi xảy ra trong quá trình xử lý:\n`{e}`")
-        except Exception:
-            pass
+        print(f"❌ Error: {e}")
+        try: await status.edit_text(f"❌ Đã xảy ra lỗi:\n`{e}`")
+        except Exception: pass
 
 def main():
     threading.Thread(target=run_web_server, daemon=True).start()
-    
     if not BOT_TOKEN:
-        print("❌ Chưa cấu hình BOT_TOKEN trên Render Environment Variables!")
+        print("❌ Thiếu BOT_TOKEN!")
         return
-
-    print("🤖 Đang khởi tạo Bot Telegram...")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("✅ Bot đã sẵn sàng chạy!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
