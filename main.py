@@ -14,14 +14,14 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes
 # ============================================================
 # 🔑 DÁN TOKEN BOTFATHER CỦA BẠN VÀO ĐÂY
 # ============================================================
-BOT_TOKEN = "8761120605:AAGGOEpFEQRZChufPR454jOgCdHb_OTD8vs"
+BOT_TOKEN = "8761120605:AAGGOEpFEQRZChufPR454jOgCdHb_OTD8vsY"
 
 # --- WEB SERVER GIẢ LẬP ĐỂ RENDER CHẠY 24/7 ---
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Bot TruyenFull Fast-Engine đang hoạt động 24/7!"
+    return "Bot TruyenFull Fix Title Engine đang hoạt động 24/7!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -45,68 +45,92 @@ def normalize_url(url):
 def clean_text(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
-def get_chapter_name(a, href):
-    span = a.select_one(".chapter-text")
-    if span:
-        name = clean_text(span.get_text(" ", strip=True))
-        if name:
-            return name
+def get_chapter_name_smart(a, href):
+    """ Hàm thông minh trích xuất tiêu đề đầy đủ cả số chương """
+    title_attr = clean_text(a.get("title"))
+    text_attr = clean_text(a.get_text(" ", strip=True))
+    
+    # 1. Thử lấy từ thuộc tính title nếu nó dài hơn và có số
+    if title_attr and re.search(r"\d+", title_attr):
+        return title_attr
 
-    title = clean_text(a.get("title"))
-    if title:
-        return title
+    # 2. Nếu text hiển thị có số (ví dụ: "Chương 38: Tên chương")
+    if text_attr and re.search(r"\d+", text_attr):
+        return text_attr
 
-    text = clean_text(a.get_text(" ", strip=True))
-    if text:
-        return text
-
+    # 3. NẾU BỊ LỖI CHỈ CÓ MỖI CHỮ "Chương" -> BẮT SỐ TỪ URL (href)
     match = re.search(r"/chuong[-_](\d+(?:[-_]\d+)?)[^/]*", href, flags=re.I)
     if match:
-        return f"Chương {match.group(1)}"
+        chap_num = match.group(1).replace("-", ".")
+        # Nếu text có thêm tiêu đề phụ thì ghép vào, không thì trả về "Chương X"
+        if text_attr and text_attr.lower() != "chương":
+            return f"Chương {chap_num}: {text_attr}"
+        return f"Chương {chap_num}"
 
-    return "Chương"
+    return text_attr or title_attr or "Chương"
 
-def get_all_chapters_fast(story_url):
-    """ Quét tăng dần từ trang 1, 2, 3... Không có chương mới -> DỪNG NGAY """
+def get_max_page(soup):
+    max_page = 1
+    pagination = soup.select_one(".pagination") or soup.select_one("#pagination")
+    if pagination:
+        for a in pagination.find_all("a", href=True):
+            href = a.get("href", "")
+            match = re.search(r"trang-(\d+)", href, flags=re.I)
+            if match:
+                page_num = int(match.group(1))
+                if page_num > max_page:
+                    max_page = page_num
+    return max_page
+
+def get_all_chapters_correct(story_url):
     chapters = []
     seen_urls = set()
     base_url = normalize_url(story_url)
 
-    page = 1
-    while page <= 2000:
-        page_url = base_url if page == 1 else f"{base_url}/trang-{page}/"
+    try:
+        res = session.get(base_url, timeout=10)
+        if res.status_code != 200:
+            return []
 
-        try:
-            res = session.get(page_url, timeout=10)
-            if res.status_code != 200:
-                break
+        first_soup = BeautifulSoup(res.text, 'lxml')
+        total_pages = get_max_page(first_soup)
 
-            soup = BeautifulSoup(res.text, 'lxml')
-            chapter_list = soup.find_all('ul', class_='list-chapter')
+        for page in range(1, total_pages + 1):
+            page_url = base_url if page == 1 else f"{base_url}/trang-{page}/"
+            
+            try:
+                res_page = session.get(page_url, timeout=10)
+                if res_page.status_code != 200:
+                    continue
 
-            new_found = 0
-            for ul in chapter_list:
-                for a in ul.find_all('a', href=True):
-                    href = urljoin(page_url, a.get('href'))
-                    href = normalize_url(href)
+                soup = BeautifulSoup(res_page.text, 'lxml')
+                chapter_list = soup.find_all('ul', class_='list-chapter')
 
-                    if href and href not in seen_urls:
-                        seen_urls.add(href)
-                        c_title = get_chapter_name(a, href)
-                        chapters.append({'name': c_title, 'url': href})
-                        new_found += 1
+                for ul in chapter_list:
+                    for a in ul.find_all('a', href=True):
+                        href = urljoin(page_url, a.get('href'))
+                        href = normalize_url(href)
 
-            # NẾU TRANG HIỆN TẠI KHÔNG TÌM THẤY CHƯƠNG MỚI -> DỪNG NGAY LẬP TỨC
-            if new_found == 0:
-                break
+                        if href and href not in seen_urls:
+                            seen_urls.add(href)
+                            final_title = get_chapter_name_smart(a, href)
+                            chapters.append({'name': final_title, 'url': href})
 
-            page += 1
-            time.sleep(0.1)
+            except Exception:
+                continue
 
-        except Exception:
-            break
+    except Exception:
+        pass
 
-    return chapters
+    # Nếu vẫn còn tên bị trùng hoàn toàn chữ "Chương", đánh lại số STT
+    formatted_chapters = []
+    for idx, chap in enumerate(chapters, 1):
+        t = chap['name']
+        if t.strip().lower() == "chương":
+            t = f"Chương {idx}"
+        formatted_chapters.append({'name': t, 'url': chap['url']})
+
+    return formatted_chapters
 
 def get_cover_image(soup):
     try:
@@ -147,7 +171,6 @@ def create_epub(story_title, chapters, cover_bytes, output_filename):
     if cover_bytes:
         book.set_cover("cover.jpg", cover_bytes)
 
-    # CÀO NỘI DUNG ĐA LUỒNG (10 LUỒNG SONG SONG)
     fetched_results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         results = list(executor.map(fetch_single_chapter, chapters))
@@ -171,7 +194,6 @@ def create_epub(story_title, chapters, cover_bytes, output_filename):
         epub_chapters.append(c)
         spine.append(c)
 
-    # ĐÓNG GÓI MỤC LỤC EPUB
     book.toc = tuple(epub_chapters)
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
@@ -187,7 +209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Vui lòng gửi link trang chủ của bộ truyện trên TruyenFull!")
         return
 
-    msg = await update.message.reply_text("🔍 Đang quét danh sách chương (chế độ dừng ngay khi hết trang)...")
+    msg = await update.message.reply_text("🔍 Đang quét danh sách & sửa lỗi tiêu đề chương...")
 
     try:
         res = session.get(url, timeout=10)
@@ -197,13 +219,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         story_title = title_tag.text.strip() if title_tag else "Truyện TruyenFull"
         cover_bytes = get_cover_image(soup)
 
-        chapters = get_all_chapters_fast(url)
+        chapters = get_all_chapters_correct(url)
         if not chapters:
             await msg.edit_text("❌ Không tìm thấy chương nào!")
             return
 
         total = len(chapters)
-        await msg.edit_text(f"⚡ Tìm thấy TỔNG CỘNG {total} chương!\n🚀 Đang cào nội dung siêu tốc & đóng gói file ePub...")
+        await msg.edit_text(f"⚡ Tìm thấy TỔNG CỘNG {total} chương!\n🚀 Đang cào đa luồng & đóng gói file ePub...")
 
         clean_title = re.sub(r'[\\/*?:"<>|]', "", story_title)
         file_name = f"{clean_title}.epub"
@@ -225,7 +247,7 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Bot TruyenFull Fast-Engine đang chạy...")
+    print("Bot TruyenFull Fix Title Engine đang chạy...")
     app.run_polling()
 
 if __name__ == '__main__':
