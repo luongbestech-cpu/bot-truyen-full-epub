@@ -1,5 +1,5 @@
-python-telegram-bot==21.6
-beautifulsoup4
+python-telegram-bot
 requests
-ebooklib
+beautifulsoup4
 lxml
+ebooklib
