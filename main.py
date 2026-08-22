@@ -66,9 +66,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url: return
     
-    status = await update.message.reply_text("⏳ Đang kết nối TruyenFull (Quét danh sách chương)...")
+    status = await update.message.reply_text("⏳ Đang kết nối TruyenFull (Quét toàn bộ danh sách chương)...")
     
-    story_url = url[0]
+    story_url = url[0].strip('/')
     main_soup = get_soup(story_url)
     if not main_soup:
         await status.edit_text("❌ Không thể kết nối tới trang truyện. Web có thể đang chặn mạnh.")
@@ -84,25 +84,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cover_url = img_tag['src']
 
     links = []
-    chapter_tags = main_soup.select("#list-chapter a, .list-chapter a, .chapter-list a")
-    
-    if not chapter_tags:
-        chapter_tags = [a for a in main_soup.find_all("a", href=True) if "chuong-" in a['href'] or "hoi-" in a['href']]
+    domain = "https://" + story_url.split('/')[2]
 
-    for a in chapter_tags:
-        href = a.get('href', '')
-        if href:
-            domain = "https://" + story_url.split('/')[2]
-            full_url = href if href.startswith("http") else domain + href
-            text = a.get_text().strip()
-            if text and not any(l['url'] == full_url for l in links):
-                links.append({"name": text, "url": full_url})
-            
+    # --- THUẬT TOÁN QUÉT ĐA TRANG (PHÂN TRANG TRUYENFULL) ---
+    # Lấy các link phân trang nếu có (ví dụ: ?page=1, ?page=2...) hoặc quét qua ajax/api mục lục của trang
+    pages_to_crawl = [story_url]
+    
+    # Tìm xem có thanh phân trang pagination không để lấy tất cả các trang danh sách chương
+    pagination = main_soup.select_one(".pagination") or main_soup.select(".pages")
+    if pagination:
+        page_links = pagination.find_all("a", href=True)
+        for a in page_links:
+            p_href = a['href']
+            full_p_url = p_href if p_href.startswith("http") else domain + p_href
+            if full_p_url not in pages_to_crawl:
+                pages_to_crawl.append(full_p_url)
+
+    # Nếu web dùng dạng AJAX lấy id truyện, ta thử tìm ajax chapter list (nếu có cấu trúc đặc trưng)
+    # Hoặc tiến hành quét qua danh sách các trang phân trang thu được:
+    for page_url in pages_to_crawl:
+        soup_p = main_soup if page_url == story_url else get_soup(page_url)
+        if not soup_p: continue
+        
+        chapter_tags = soup_p.select("#list-chapter a, .list-chapter a, .chapter-list a")
+        if not chapter_tags:
+            chapter_tags = [a for a in soup_p.find_all("a", href=True) if "chuong-" in a['href'] or "hoi-" in a['href']]
+
+        for a in chapter_tags:
+            href = a.get('href', '')
+            if href:
+                full_url = href if href.startswith("http") else domain + href
+                text = a.get_text().strip()
+                # Kiểm tra xem có đúng là link chương truyện không
+                if text and ("chuong-" in full_url or "hoi-" in full_url or re.search(r'\d+', text)):
+                    if not any(l['url'] == full_url for l in links):
+                        links.append({"name": text, "url": full_url})
+        
+        # Tránh gửi request quá nhanh gây quá tải
+        if len(pages_to_crawl) > 1:
+            time.sleep(0.5)
+
     if not links:
         await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn truyện.")
         return
         
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(links)} chương. Đang tải nội dung...")
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy tổng cộng {len(links)} chương. Đang tiến hành tải nội dung...")
     
     book = epub.EpubBook()
     book.set_identifier('truyenfull_' + re.sub(r'\W+', '', title))
@@ -112,7 +138,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Thêm ảnh bìa
     if cover_url:
         try:
-            domain = "https://" + story_url.split('/')[2]
             full_cover_url = cover_url if cover_url.startswith("http") else domain + cover_url
             img_data = scraper.get(full_cover_url, timeout=15).content
             book.set_cover("cover.jpg", img_data)
@@ -138,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     if success_count == 0:
         await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
@@ -151,7 +176,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
     
-    # Sửa lỗi cú pháp f-string bằng cách xử lý biến trước
     safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen"
     file_name = f"{safe_title}.epub"
     
