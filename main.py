@@ -3,7 +3,7 @@ import os
 import re
 import time
 import threading
-from urllib.parse import urldefrag, urljoin
+from urllib.parse import urldefrag, urljoin, urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -38,7 +38,7 @@ def run_web_server():
 # ============================================================
 # CẤU HÌNH CÀO TRUYỆN TOÀN DIỆN
 # ============================================================
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 15
 MAX_PAGES = 2000
 CONCURRENT_DOWNLOADS = 5  # Số chương tải song song cùng lúc
 
@@ -139,7 +139,7 @@ def parse_chapters(page_url, soup):
     return result
 
 def get_page_number(url):
-    patterns = [r"/page[-/](\d+)", r"/trang[-_](\d+)", r"[?&]page=(\d+)"]
+    patterns = [r"/page[-/](\d+)", r"/trang[-_](\d+)", r"[?&](?:page|paged)=(\d+)", r"/(\d+)$"]
     for pattern in patterns:
         match = re.search(pattern, url, flags=re.I)
         if match:
@@ -162,7 +162,7 @@ def find_pagination_links(page_url, soup):
                 continue
             low = href.lower()
             is_page = False
-            if re.search(r"/(?:page|trang)[-_/]?\d+", low) or "[?&]page=\d+" in low:
+            if re.search(r"/(?:page|trang)[-_/]?\d+", low) or re.search(r"[?&](?:page|paged)=\d+", low):
                 is_page = True
             if text.isdigit() and 1 <= int(text) <= MAX_PAGES:
                 is_page = True
@@ -197,31 +197,243 @@ def find_next_page(current_url, soup, visited):
             return link
     return None
 
+WP_CONTENT_SELECTORS = [
+    ".entry-content", ".post-content", ".chapter-content", ".chapter-c",
+    ".reading-content", ".wp-block-post-content", "article .content", "article"
+]
+
+WP_IGNORE_CLASSES = {
+    "related", "related-posts", "related-post", "yarpp-related", "jp-relatedposts",
+    "post-related", "similar-posts", "recommended-posts", "comments",
+    "comment-respond", "comments-area", "share", "sharedaddy"
+}
+
+def is_wordpress_url(url, soup=None):
+    host = urlparse(url).netloc.lower()
+    if "wordpress.com" in host or "wp-content" in url.lower() or "wp-includes" in url.lower():
+        return True
+    if soup is not None:
+        meta = soup.select_one("meta[name='generator']")
+        if meta and "wordpress" in (meta.get("content") or "").lower():
+            return True
+        if soup.select_one("link[href*='wp-content'], script[src*='wp-content'], link[href*='wp-includes'], script[src*='wp-includes']"):
+            return True
+        if soup.select_one("body[class*='wp-']"):
+            return True
+    return False
+
+def looks_like_chapter_title(text):
+    return bool(re.search(r"\b(?:chương|chuong|chapter|chap)\s*\d+\b", clean_text(text), re.I))
+
+def get_wp_content(soup):
+    if soup is None:
+        return None
+    for selector in WP_CONTENT_SELECTORS[:-2]:
+        el = soup.select_one(selector)
+        if el and len(clean_text(el.get_text(" ", strip=True))) >= 100:
+            return el
+    candidates = []
+    for el in soup.select("article"):
+        n = len(clean_text(el.get_text(" ", strip=True)))
+        if n >= 100:
+            candidates.append((n, el))
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+    return None
+
+def get_wp_chapter_title(soup, content=None):
+    elements = []
+    if content:
+        elements.extend(content.find_all(["h1", "h2", "h3", "h4"], limit=20))
+    elements.extend(soup.select("h1.entry-title, h1.post-title, h1, h2.entry-title, h2.post-title"))
+    seen = set()
+    for el in elements:
+        if id(el) in seen:
+            continue
+        seen.add(id(el))
+        text = clean_text(el.get_text(" ", strip=True))
+        if looks_like_chapter_title(text):
+            return text
+    meta = soup.select_one("meta[property='og:title']")
+    if meta:
+        text = clean_text(meta.get("content", ""))
+        if looks_like_chapter_title(text):
+            return text
+    return ""
+
+def is_related_anchor(a):
+    parent = a
+    for _ in range(6):
+        parent = parent.parent
+        if parent is None:
+            break
+        classes = {c.lower() for c in (parent.get("class") or [])}
+        ident = (parent.get("id") or "").lower()
+        if classes & WP_IGNORE_CLASSES or any(x in ident for x in ["related", "recommend", "similar", "comment", "share"]):
+            return True
+        text = clean_text(parent.get_text(" ", strip=True)).lower()
+        if "có liên quan" in text and len(text) < 500:
+            return True
+    return False
+
+def same_article_family(current_url, target_url):
+    cur, tar = urlparse(current_url), urlparse(target_url)
+    if cur.netloc.lower() != tar.netloc.lower():
+        return False
+    cp, tp = cur.path.rstrip("/").lower(), tar.path.rstrip("/").lower()
+    if re.match(rf"^{re.escape(cp)}/(?:page[-/]?)?\d+$", tp):
+        return True
+    cparts, tparts = [x for x in cp.split("/") if x], [x for x in tp.split("/") if x]
+    return bool(cparts and tparts and cparts[:-1] == tparts[:-1])
+
+def is_next_text(text):
+    text = clean_text(text).lower().strip(" ›»→")
+    return bool(re.search(r"^(?:chương\s+(?:tiếp theo|sau)|chuong\s+(?:tiep theo|sau)|tiếp theo|tiep theo|chương sau|chuong sau|next|next chapter|next post|trang sau|sau|›|»|→)$", text, re.I))
+
+def get_current_wp_page_number(url, chapter_number=None):
+    page = get_page_number(url)
+    if page is not None:
+        return page
+    if chapter_number is not None and float(chapter_number).is_integer():
+        return int(chapter_number)
+    return 1
+
+def find_wp_next_url(current_url, soup, current_chapter_number=None, visited=None):
+    if soup is None:
+        return None
+    visited = visited or set()
+    # 1. rel=next
+    for a in soup.select("a[rel~='next'], link[rel~='next']"):
+        href = a.get("href")
+        if not href:
+            continue
+        target = normalize_url(urljoin(current_url, href))
+        if target and target not in visited and same_article_family(current_url, target):
+            return target
+    # 2. Chương tiếp theo / Chương sau / Next
+    for a in soup.find_all("a", href=True):
+        if is_related_anchor(a):
+            continue
+        if not is_next_text(a.get_text(" ", strip=True)):
+            continue
+        target = normalize_url(urljoin(current_url, a.get("href")))
+        if target and target not in visited and target != normalize_url(current_url) and same_article_family(current_url, target):
+            return target
+    # 3. Phân trang số: chọn đúng current + 1, tránh "Có liên quan"
+    current_page = get_current_wp_page_number(current_url, current_chapter_number)
+    candidates = []
+    for a in soup.find_all("a", href=True):
+        if is_related_anchor(a):
+            continue
+        text = clean_text(a.get_text(" ", strip=True))
+        if not text.isdigit() or int(text) != current_page + 1:
+            continue
+        target = normalize_url(urljoin(current_url, a.get("href")))
+        if not target or target in visited or target == normalize_url(current_url):
+            continue
+        classes = " ".join(a.get("class") or []).lower()
+        parent_classes = " ".join(a.parent.get("class") or []).lower() if a.parent else ""
+        href_low = target.lower()
+        is_pagination = (
+            "post-page-numbers" in classes or "page-numbers" in classes or "pagination" in classes
+            or "post-page-numbers" in parent_classes or "pagination" in parent_classes
+            or bool(re.search(r"/(?:page/|page-|trang[-_/])?\d+/?$", href_low))
+            or bool(re.search(r"[?&](?:page|paged)=\d+", href_low))
+        )
+        if is_pagination or same_article_family(current_url, target):
+            candidates.append(target)
+    return candidates[0] if candidates else None
+
+def parse_wordpress_chapter(page_url, soup, fallback_number=None):
+    content = get_wp_content(soup)
+    if content is None:
+        return None
+    title = get_wp_chapter_title(soup, content)
+    number = extract_chapter_number(title)
+    if number is None:
+        number = fallback_number
+    if number is None:
+        return None
+    if not title:
+        title = f"Chương {int(number) if float(number).is_integer() else number}"
+    return {"name": clean_text(title), "url": normalize_url(page_url), "number": float(number)}
+
+def collect_wordpress_chapters(story_url):
+    current_url = normalize_url(story_url)
+    visited, chapters, seen_numbers = set(), [], set()
+    fallback_number = 1
+    for _ in range(MAX_PAGES):
+        if current_url in visited:
+            break
+        visited.add(current_url)
+        soup = get_soup(current_url)
+        if soup is None:
+            break
+        item = parse_wordpress_chapter(current_url, soup, fallback_number)
+        if item is None:
+            print(f"⚠️ Không nhận diện được chương: {current_url}")
+            break
+        if item["number"] in seen_numbers:
+            print(f"🛑 Chương {item['number']} bị lặp, dừng.")
+            break
+        seen_numbers.add(item["number"])
+        chapters.append(item)
+        print(f"📖 WordPress: {item['name']}")
+        next_url = find_wp_next_url(current_url, soup, item["number"], visited)
+        if not next_url:
+            print("🛑 Không còn chương tiếp theo.")
+            break
+        current_url = next_url
+        fallback_number = int(item["number"]) + 1 if float(item["number"]).is_integer() else fallback_number + 1
+        time.sleep(0.1)
+    return sorted(chapters, key=lambda x: x["number"])
+
+def slug_to_title(url):
+    slug = urlparse(url).path.rstrip("/").split("/")[-1]
+    return clean_text(re.sub(r"[-_]+", " ", slug)).title() if slug else "Truyện"
+
 def get_story_info(story_url):
     soup = get_soup(story_url)
     if soup is None:
         raise RuntimeError("Không truy cập được trang truyện.")
     title = ""
-    for selector in ["h1.title", "h1", "meta[property='og:title']", "title"]:
-        element = soup.select_one(selector)
-        if not element:
-            continue
-        title = clean_text(element.get("content", "")) if element.name == "meta" else clean_text(element.get_text(" ", strip=True))
-        if title:
-            break
+    if is_wordpress_url(story_url, soup):
+        for selector in [".site-title a", ".site-title", "header .site-title a", "header .site-title"]:
+            el = soup.select_one(selector)
+            if el:
+                candidate = clean_text(el.get_text(" ", strip=True))
+                if candidate and not looks_like_chapter_title(candidate):
+                    title = candidate
+                    break
+    if not title:
+        for selector in ["h1.title", "h1.entry-title", "h1.post-title", "h1", "meta[property='og:title']", "title"]:
+            el = soup.select_one(selector)
+            if not el:
+                continue
+            title = clean_text(el.get("content", "")) if el.name == "meta" else clean_text(el.get_text(" ", strip=True))
+            if title:
+                break
+    if is_wordpress_url(story_url, soup) and looks_like_chapter_title(title):
+        title = slug_to_title(story_url)
     title = title or "Truyện"
     cover_url = None
-    for selector in ["meta[property='og:image']", ".book img", ".info img"]:
-        element = soup.select_one(selector)
-        if not element:
+    for selector in ["meta[property='og:image']", ".book img", ".info img", ".post-thumbnail img", "article img"]:
+        el = soup.select_one(selector)
+        if not el:
             continue
-        src = element.get("content") if element.name == "meta" else (element.get("src") or element.get("data-src"))
+        src = el.get("content") if el.name == "meta" else (el.get("src") or el.get("data-src") or el.get("data-lazy-src"))
         if src:
             cover_url = urljoin(story_url, src)
             break
     return title, cover_url, soup
 
 def collect_chapters(story_url):
+    soup0 = get_soup(story_url)
+    if is_wordpress_url(story_url, soup0):
+        print(f"🟣 Phát hiện WordPress: {story_url}")
+        return collect_wordpress_chapters(story_url)
+    print(f"🟢 Phát hiện TruyenFull: {story_url}")
     story_url = normalize_url(story_url)
     current_url = story_url
     visited = set()
@@ -262,6 +474,24 @@ def download_single_chapter(chapter_info):
     soup = get_soup(url)
     if soup is None:
         return None
+    if is_wordpress_url(url, soup):
+        content = get_wp_content(soup)
+        if content is None:
+            return None
+        for tag in content.find_all(["script", "style", "iframe", "form", "noscript", "nav", "footer", "aside", "button"]):
+            tag.decompose()
+        for element in list(content.find_all(True)):
+            classes = {c.lower() for c in (element.get("class") or [])}
+            ident = (element.get("id") or "").lower()
+            class_text = " ".join(classes)
+            if (classes & WP_IGNORE_CLASSES
+                    or any(x in ident for x in ["related", "recommend", "comment", "share"])
+                    or any(x in class_text for x in ["pagination", "post-page-numbers", "page-numbers"])):
+                element.decompose()
+        for a in list(content.find_all("a", href=True)):
+            if is_next_text(a.get_text(" ", strip=True)):
+                a.decompose()
+        return str(content)
     content = None
     for selector in [".chapter-c", "#chapter-c", ".chapter-content", ".reading-content"]:
         element = soup.select_one(selector)
