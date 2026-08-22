@@ -3,3 +3,4 @@ beautifulsoup4
 requests
 EbookLib
 flask
+lxml
