@@ -40,7 +40,7 @@ def run_web_server():
 # ============================================================
 REQUEST_TIMEOUT = 15
 MAX_PAGES = 2000
-CONCURRENT_DOWNLOADS = 5  # Số chương tải song song cùng lúc
+CONCURRENT_DOWNLOADS = 2  # Giảm song song để tránh TruyenFull/WordPress chặn kết nối
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -49,16 +49,34 @@ HEADERS = {
     "Referer": "https://truyenfull.vn/",
 }
 
-session = requests.Session()
-session.headers.update(HEADERS)
+session_local = threading.local()
 
-def fetch(url, timeout=REQUEST_TIMEOUT):
-    try:
-        response = session.get(url, timeout=timeout, allow_redirects=True)
-        response.raise_for_status()
-        return response
-    except Exception:
-        return None
+def get_session():
+    """Mỗi worker thread có một requests.Session riêng để tránh Session dùng chung gây treo."""
+    if not hasattr(session_local, "session"):
+        s = requests.Session()
+        s.headers.update(HEADERS)
+        session_local.session = s
+    return session_local.session
+
+def fetch(url, timeout=REQUEST_TIMEOUT, retries=2):
+    """GET có timeout cứng + retry; không để một chương làm treo cả job."""
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            response = get_session().get(
+                url,
+                timeout=(5, timeout),
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
+    print(f"⚠️ GET thất bại ({retries + 1} lần): {url} | {last_error}")
+    return None
 
 def get_soup(url):
     response = fetch(url)
@@ -299,51 +317,107 @@ def get_current_wp_page_number(url, chapter_number=None):
         return int(chapter_number)
     return 1
 
+def wp_candidate_score(current_url, target_url, anchor_text):
+    """Điểm ưu tiên cho link chương kế tiếp, loại link liên quan."""
+    cur = urlparse(current_url)
+    tar = urlparse(target_url)
+    if cur.netloc.lower() != tar.netloc.lower():
+        return -1
+    text = clean_text(anchor_text).lower()
+    score = 0
+    if is_next_text(text):
+        score += 100
+    if text.isdigit():
+        score += 50
+    if re.search(r'(?:post-page-numbers|page-numbers|pagination|nav-previous|next)',
+                 ' '.join([]), re.I):
+        score += 5
+    # Cùng đường dẫn bài gốc hoặc URL phân trang của chính bài.
+    if same_article_family(current_url, target_url):
+        score += 30
+    return score
+
 def find_wp_next_url(current_url, soup, current_chapter_number=None, visited=None):
     if soup is None:
         return None
     visited = visited or set()
-    # 1. rel=next
+    current = normalize_url(current_url)
+    candidates = []
+
+    # 1) rel=next: ưu tiên cao nhất.
     for a in soup.select("a[rel~='next'], link[rel~='next']"):
         href = a.get("href")
         if not href:
             continue
         target = normalize_url(urljoin(current_url, href))
-        if target and target not in visited and same_article_family(current_url, target):
-            return target
-    # 2. Chương tiếp theo / Chương sau / Next
-    for a in soup.find_all("a", href=True):
-        if is_related_anchor(a):
+        if not target or target in visited or target == current:
             continue
-        if not is_next_text(a.get_text(" ", strip=True)):
-            continue
-        target = normalize_url(urljoin(current_url, a.get("href")))
-        if target and target not in visited and target != normalize_url(current_url) and same_article_family(current_url, target):
-            return target
-    # 3. Phân trang số: chọn đúng current + 1, tránh "Có liên quan"
-    current_page = get_current_wp_page_number(current_url, current_chapter_number)
-    candidates = []
+        if not is_related_anchor(a):
+            # rel=next thường đáng tin cậy; chỉ cần cùng domain.
+            # Không bắt buộc cùng slug vì nhiều WordPress dùng mỗi chương
+            # là một bài riêng: /chuong-1/ -> /chuong-2/.
+            if urlparse(current).netloc.lower() == urlparse(target).netloc.lower():
+                candidates.append((130, target))
+
+    # 2) Các nút chữ Chương tiếp theo / Chương sau / Next.
     for a in soup.find_all("a", href=True):
         if is_related_anchor(a):
             continue
         text = clean_text(a.get_text(" ", strip=True))
-        if not text.isdigit() or int(text) != current_page + 1:
+        if not is_next_text(text):
             continue
         target = normalize_url(urljoin(current_url, a.get("href")))
-        if not target or target in visited or target == normalize_url(current_url):
+        if not target or target in visited or target == current:
             continue
-        classes = " ".join(a.get("class") or []).lower()
-        parent_classes = " ".join(a.parent.get("class") or []).lower() if a.parent else ""
+        if urlparse(current).netloc.lower() == urlparse(target).netloc.lower():
+            candidates.append((120, target))
+
+    # 3) Phân trang số của chính bài: WordPress thường dùng /2/, /3/...
+    current_page = get_current_wp_page_number(current_url, current_chapter_number)
+    wanted = current_page + 1
+    for a in soup.find_all("a", href=True):
+        if is_related_anchor(a):
+            continue
+        text = clean_text(a.get_text(" ", strip=True))
+        if text != str(wanted):
+            continue
+        target = normalize_url(urljoin(current_url, a.get("href")))
+        if not target or target in visited or target == current:
+            continue
+        classes = ' '.join(a.get("class") or []).lower()
+        parent_classes = ' '.join(a.parent.get("class") or []).lower() if a.parent else ''
         href_low = target.lower()
-        is_pagination = (
-            "post-page-numbers" in classes or "page-numbers" in classes or "pagination" in classes
-            or "post-page-numbers" in parent_classes or "pagination" in parent_classes
-            or bool(re.search(r"/(?:page/|page-|trang[-_/])?\d+/?$", href_low))
-            or bool(re.search(r"[?&](?:page|paged)=\d+", href_low))
+        pagination_like = (
+            'post-page-numbers' in classes or 'page-numbers' in classes
+            or 'pagination' in classes or 'post-page-numbers' in parent_classes
+            or 'pagination' in parent_classes
+            or bool(re.search(r'/(?:page/|page-|trang[-_/])?\d+/?$', href_low))
+            or bool(re.search(r'[?&](?:page|paged)=\d+', href_low))
         )
-        if is_pagination or same_article_family(current_url, target):
-            candidates.append(target)
-    return candidates[0] if candidates else None
+        if pagination_like or same_article_family(current, target):
+            candidates.append((100, target))
+
+    # 4) Một số theme dùng nút mũi tên nhưng không có chữ. Chỉ chấp nhận
+    #    khi nó nằm trong vùng điều hướng, tránh lấy link "Có liên quan".
+    for a in soup.find_all("a", href=True):
+        if is_related_anchor(a):
+            continue
+        text = clean_text(a.get_text(" ", strip=True))
+        if text not in {'›', '»', '→', '>', '>>'}:
+            continue
+        target = normalize_url(urljoin(current_url, a.get("href")))
+        if not target or target in visited or target == current:
+            continue
+        parent_text = clean_text(a.parent.get_text(" ", strip=True)).lower() if a.parent else ''
+        if (urlparse(current).netloc.lower() == urlparse(target).netloc.lower()
+                and any(x in parent_text for x in ['chương', 'next', 'tiếp'])):
+            candidates.append((90, target))
+
+    if not candidates:
+        return None
+    # Giữ thứ tự đầu tiên khi cùng điểm để không nhảy nhầm.
+    candidates.sort(key=lambda x: -x[0])
+    return candidates[0][1]
 
 def parse_wordpress_chapter(page_url, soup, fallback_number=None):
     content = get_wp_content(soup)
@@ -537,7 +611,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(0, total_chaps, CONCURRENT_DOWNLOADS):
             batch = chapters[i:i + CONCURRENT_DOWNLOADS]
             tasks = [loop.run_in_executor(None, download_single_chapter, c) for c in batch]
-            results = await asyncio.gather(*tasks)
+            try:
+                results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=90)
+            except asyncio.TimeoutError:
+                print(f"⚠️ Batch {i + 1}-{min(i + CONCURRENT_DOWNLOADS, total_chaps)} quá lâu, bỏ qua batch này.")
+                results = [None] * len(batch)
             
             for idx, content in enumerate(results):
                 chap_idx = i + idx
