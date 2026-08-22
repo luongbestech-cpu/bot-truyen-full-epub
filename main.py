@@ -11,17 +11,15 @@ from urllib.parse import urljoin, urldefrag
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# ============================================================
-# 🔑 DÁN TOKEN BOTFATHER CỦA BẠN VÀO ĐÂY
-# ============================================================
-BOT_TOKEN = "8761120605:AAGGOEpFEQRZChufPR454jOgCdHb_OTD8vsY"
+# Lấy Token từ biến môi trường hoặc điền trực tiếp
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ĐIỀN_TOKEN_THẬT_VÀO_ĐÂY")
 
 # --- WEB SERVER GIẢ LẬP ĐỂ RENDER CHẠY 24/7 ---
 app_web = Flask(__name__)
 
 @app_web.route('/')
 def home():
-    return "Bot TruyenFull Fix Title Engine đang hoạt động 24/7!"
+    return "Bot TruyenFull đang hoạt động 24/7!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -46,23 +44,18 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 def get_chapter_name_smart(a, href):
-    """ Hàm thông minh trích xuất tiêu đề đầy đủ cả số chương """
     title_attr = clean_text(a.get("title"))
     text_attr = clean_text(a.get_text(" ", strip=True))
     
-    # 1. Thử lấy từ thuộc tính title nếu nó dài hơn và có số
     if title_attr and re.search(r"\d+", title_attr):
         return title_attr
 
-    # 2. Nếu text hiển thị có số (ví dụ: "Chương 38: Tên chương")
     if text_attr and re.search(r"\d+", text_attr):
         return text_attr
 
-    # 3. NẾU BỊ LỖI CHỈ CÓ MỖI CHỮ "Chương" -> BẮT SỐ TỪ URL (href)
     match = re.search(r"/chuong[-_](\d+(?:[-_]\d+)?)[^/]*", href, flags=re.I)
     if match:
         chap_num = match.group(1).replace("-", ".")
-        # Nếu text có thêm tiêu đề phụ thì ghép vào, không thì trả về "Chương X"
         if text_attr and text_attr.lower() != "chương":
             return f"Chương {chap_num}: {text_attr}"
         return f"Chương {chap_num}"
@@ -122,7 +115,6 @@ def get_all_chapters_correct(story_url):
     except Exception:
         pass
 
-    # Nếu vẫn còn tên bị trùng hoàn toàn chữ "Chương", đánh lại số STT
     formatted_chapters = []
     for idx, chap in enumerate(chapters, 1):
         t = chap['name']
@@ -209,7 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Vui lòng gửi link trang chủ của bộ truyện trên TruyenFull!")
         return
 
-    msg = await update.message.reply_text("🔍 Đang quét danh sách & sửa lỗi tiêu đề chương...")
+    msg = await update.message.reply_text("🔍 Đang quét danh sách & kiểm tra tiêu đề chương...")
 
     try:
         res = session.get(url, timeout=10)
@@ -245,9 +237,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
+    if not BOT_TOKEN or "ĐIỀN_TOKEN" in BOT_TOKEN:
+        print("❌ LỖI: Bạn chưa cài đặt BOT_TOKEN!")
+        return
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("Bot TruyenFull Fix Title Engine đang chạy...")
+    print("Bot TruyenFull đang khởi chạy...")
     app.run_polling()
 
 if __name__ == '__main__':
