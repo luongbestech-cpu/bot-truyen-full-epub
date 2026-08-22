@@ -1,616 +1,95 @@
-# ============================================================
-# 🤖 TELEGRAM BOT → TRUYỆN FULL → EPUB
-# CHẠY TRÊN GITHUB
-# ============================================================
-
+import asyncio
 import os
 import re
 import time
-import asyncio
 import requests
-
 from bs4 import BeautifulSoup
 from ebooklib import epub
-
-from urllib.parse import (
-    urljoin,
-    urldefrag,
-)
-
 from telegram import Update
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-
-# ============================================================
-# 🔑 TOKEN
-# Lấy từ GitHub Secrets
-# ============================================================
-
-BOT_TOKEN = os.environ.get("BOT_TOKEN_TRUYENFULL", "").strip()
-
-
-# ============================================================
-# CẤU HÌNH
-# ============================================================
-
-REQUEST_TIMEOUT = 15
-
-MAX_PAGES = 2000
-
+# CẤU HÌNH ĐỂ KHÔNG BỊ CHẶN
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,image/avif,"
-        "image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": (
-        "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
-    ),
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Referer": "https://truyenfull.live/",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
-session = requests.Session()
-session.headers.update(HEADERS)
-
-
-# ============================================================
-# KIỂM TRA TOKEN
-# ============================================================
-
-if (
-    not BOT_TOKEN
-    or ":" not in BOT_TOKEN
-):
-
-    raise ValueError(
-        "❌ BOT_TOKEN chưa được cấu hình trong GitHub Secrets."
-    )
-
-
-# ============================================================
-# REQUEST
-# ============================================================
-
-def fetch(url, timeout=REQUEST_TIMEOUT):
-
-    try:
-
-        response = session.get(
-            url,
-            timeout=timeout,
-            allow_redirects=True,
-        )
-
-        response.raise_for_status()
-
-        return response
-
-    except Exception as e:
-
-        print(f"⚠️ Không tải được: {url}")
-        print(f"   {type(e).__name__}: {e}")
-
-        return None
-
-
 def get_soup(url):
-
-    response = fetch(url)
-
-    if response is None:
+    try:
+        # Tăng thời gian chờ lên 30 giây để tránh Timed out
+        response = requests.get(url, headers=HEADERS, timeout=30)
+        if response.status_code == 200:
+            return BeautifulSoup(response.content, "lxml")
+    except:
         return None
-
-    return BeautifulSoup(
-        response.text,
-        "lxml"
-    )
-
-
-# ============================================================
-# URL
-# ============================================================
-
-def normalize_url(url):
-
-    if not url:
-        return ""
-
-    url = urldefrag(url)[0]
-
-    return url.rstrip("/")
-
-
-# ============================================================
-# TEXT
-# ============================================================
-
-def clean_text(text):
-
-    return re.sub(
-        r"\s+",
-        " ",
-        text or ""
-    ).strip()
-
-
-# ============================================================
-# SỐ CHƯƠNG
-# ============================================================
-def extract_chapter_number(text):
-
-    text = clean_text(text)
-
-    patterns = [
-
-        r"(?:chương|chuong|chapter|chap)"
-        r"\s*(\d+)"
-        r"(?:\s*[-–]\s*(\d+))?",
-
-        r"/chuong[-_](\d+)"
-        r"(?:[-_](\d+))?",
-    ]
-
-    for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            text,
-            flags=re.I
-        )
-
-        if not match:
-            continue
-
-        first = int(match.group(1))
-
-        second = match.group(2)
-
-        if second:
-
-            return (
-                first
-                + int(second) / 10
-            )
-
-        return float(first)
-
     return None
 
-
-# ============================================================
-# TÊN CHƯƠNG
-# ============================================================
-
-def get_chapter_name(a, href):
-
-    span = a.select_one(
-        ".chapter-text"
-    )
-
-    if span:
-
-        name = clean_text(
-            span.get_text(
-                " ",
-                strip=True
-            )
-        )
-
-        if name:
-            return name
-
-
-    title = clean_text(
-        a.get("title")
-    )
-
-    if title:
-        return title
-
-
-    text = clean_text(
-        a.get_text(
-            " ",
-            strip=True
-        )
-    )
-
-    if text:
-        return text
-
-
-    match = re.search(
-        r"/chuong[-_](\d+(?:[-_]\d+)?)[^/]*",
-        href,
-        flags=re.I
-    )
-
-    if match:
-
-        return (
-            "Chương "
-            + match.group(1)
-        )
-
-
-    return "Chương"
-
-
-# ============================================================
-# LINK CHƯƠNG
-# ============================================================
-
-def is_chapter_link(text, href):
-
-    combined = (
-        clean_text(text)
-        + " "
-        + (href or "")
-    )
-
-    if re.search(
-        r"(?:chương|chuong|chapter|chap)"
-        r"\s*\d+",
-        combined,
-        flags=re.I
-    ):
-
-        return True
-
-
-    if re.search(
-        r"/chuong[-_]\d+",
-        href or "",
-        flags=re.I
-    ):
-
-        return True
-
-
-    return False
-
-
-# ============================================================
-# LẤY CHƯƠNG TRÊN PAGE
-# ============================================================
-
-def parse_chapters(
-    page_url,
-    soup
-):
-
-    result = {}
-
-    if soup is None:
-        return result
-
-
-    containers = []
-
-    main = soup.select_one(
-        "#list-chapter"
-    )
-
-    if main:
-        containers.append(main)
-
-
-    if not containers:
-
-        containers = soup.select(
-            ".list-chapter"
-        )
-
-
-    if not containers:
-
-        containers = [soup]
-
-
-    for container in containers:
-
-        for a in container.find_all(
-            "a",
-            href=True
-        ):
-
-            href = urljoin(
-                page_url,
-                a.get("href")
-            )
-
-            href = normalize_url(
-                href
-            )
-
-            if not href:
-                continue
-
-
-            name = get_chapter_name(a,
-                href
-            )
-
-
-            if not is_chapter_link(
-                name,
-                href
-            ):
-
-                continue
-
-
-            number = extract_chapter_number(
-                name
-                + " "
-                + href
-            )
-
-
-            if number is None:
-                continue
-
-
-            result[href] = {
-
-                "name": name,
-
-                "url": href,
-
-                "number": number,
-
-            }
-
-
-    return result
-
-
-# ============================================================
-# SỐ PAGE
-# ============================================================
-
-def get_page_number(url):
-
-    patterns = [
-
-        r"/page[-/](\d+)",
-
-        r"/trang[-_](\d+)",
-
-        r"[?&]page=(\d+)",
-
-    ]
-
-    for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            url,
-            flags=re.I
-        )
-
-        if match:
-
-            return int(
-                match.group(1)
-            )
-
-
-    return None
-
-
-# ============================================================
-# TÌM PAGE TIẾP THEO
-# ============================================================
-
-def find_pagination_links(
-    page_url,
-    soup
-):
-
-    pages = []
-
-    if soup is None:
-        return pages
-
-
-    seen = set()
-
-
-    selectors = [
-
-        ".pagination",
-
-        "ul.pagination",
-
-        ".page-navigation",
-
-        ".pager",
-
-        "nav",
-
-    ]
-
-
-    nodes = []
-
-
-    for selector in selectors:
-
-        found = soup.select(
-            selector
-        )
-
-        if found:
-
-            nodes.extend(found)
-
-
-    if not nodes:
-
-        nodes = [soup]
-
-
-    for node in nodes:
-
-        for a in node.find_all(
-            "a",
-            href=True
-        ):
-
-            href = urljoin(
-                page_url,
-                a.get("href")
-            )
-
-            href = normalize_url(
-                href
-            )
-
-            if not href:
-                continue
-
-
-            text = clean_text(
-                a.get_text(
-                    " ",
-                    strip=True
-                )
-            ).lower()
-
-
-            if is_chapter_link(
-                text,
-                href
-            ):
-
-                continue
-
-
-            low = href.lower()
-
-            is_page = False
-
-
-            if re.search(
-                r"/page[-/]?\d+",
-                low
-            ):
-
-                is_page = True
-
-
-            if re.search(
-                r"/trang[-_]\d+",
-                low
-            ):
-
-                is_page = True
-
-
-            if re.search(
-                r"[?&]page=\d+",
-                low
-            ):
-
-                is_page = True
-
-
-            if text.isdigit():
-
-                n = int(text)
-
-                if 1 <= n <= MAX_PAGES:
-
-                    is_page = True
-
-
-            if text in {
-                "next",
-                "tiếp",
-                "trang sau",
-                "sau","»",
-                "›",
-                "→",
-            }:
-
-                is_page = True
-
-
-            if is_page and href not in seen:
-
-                seen.add(href)
-
-                pages.append(href)
-
-
-    return pages
-
-
-# ============================================================
-# PAGE KẾ TIẾP
-# ============================================================
-
-def find_next_page(
-    current_url,
-    soup,
-    visited
-):
-
-    links = find_pagination_links(
-        current_url,
-        soup
-    )
-
-
-    candidates = []
-
-
-    for link in links:
-
-        if link in visited:
-            continue
-
-
-        number = get_page_number(
-            link
-        )
-
-
-        if number is not None:
-
-            candidates.append(
-                (
-                    number,
-                    link
-                )
-            )
-
-
-    if candidates:
-
-        candidates.sort(
-            key=lambda x: x[0]
-        )
-
-
-        current_number = get_page_number(
-            current_url
-        )
-
-
-        if current_number is None:
-
-            current_number = 1
-
-
-        for
+def download_chapter(url):
+    soup = get_soup(url)
+    if not soup: return None
+    
+    # Tìm vùng nội dung - TruyenFull thường là .chapter-content hoặc #chapter-c
+    content = soup.select_one(".chapter-content") or soup.select_one("#chapter-c")
+    if not content: return None
+    
+    # Xóa quảng cáo/rác
+    for tag in content.find_all(["script", "style", "div", "ins"]):
+        tag.decompose()
+        
+    return str(content)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = re.findall(r"https?://[^\s]+", update.message.text or "")
+    if not url: return
+    
+    status = await update.message.reply_text("⏳ Đang kết nối TruyenFull... (chế độ an toàn)")
+    
+    # 1. Lấy danh sách chương (Vét cạn trang)
+    main_soup = get_soup(url[0])
+    if not main_soup:
+        await status.edit_text("❌ Lỗi kết nối đến trang truyện.")
+        return
+        
+    title = main_soup.select_one("h1").get_text().strip()
+    links = []
+    # Đơn giản hóa: Lấy tất cả link chương trong list-chapter
+    for a in main_soup.select("#list-chapter a"):
+        links.append({"name": a.get_text().strip(), "url": "https://truyenfull.live" + a['href']})
+    
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(links)} chương. Đang tải tuần tự...")
+    
+    # 2. Tải từng chương một (Không tải song song để tránh bị chặn)
+    book = epub.EpubBook()
+    book.set_title(title)
+    
+    for i, item in enumerate(links):
+        content = download_chapter(item['url'])
+        if content:
+            chap = epub.EpubHtml(title=item['name'], file_name=f"chap_{i}.xhtml")
+            chap.content = f"<h2>{item['name']}</h2>{content}"
+            book.add_item(chap)
+            book.spine.append(chap)
+        
+        # Cập nhật tiến độ mỗi 10 chương
+        if i % 10 == 0:
+            pct = int((i / len(links)) * 100)
+            await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i}/{len(links)})")
+        
+        # Quan trọng: Nghỉ 0.5 giây sau mỗi chương để tránh bị web khóa IP
+        time.sleep(0.5)
+
+    # 3. Xuất file
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    file_name = f"{title}.epub"
+    epub.write_epub(file_name, book)
+    
+    await update.message.reply_document(document=open(file_name, "rb"), caption=f"✅ Xong: {title}")
+    await status.delete()
+    os.remove(file_name)
+
+if __name__ == "__main__":
+    app = Application.builder().token(os.getenv("BOT_TOKEN")).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.run_polling()
