@@ -11,163 +11,112 @@ import requests
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-# ============================================================
-# 🔑 TOKEN & WEB SERVER DUMMY
-# ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("bot_token_truyenfull") or os.getenv("BOT_TOKEN")
-
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html; charset=utf-8')
-        self.end_headers()
-        self.wfile.write("Bot Truyen All-in-One đang hoạt động!".encode('utf-8'))
-
-    def log_message(self, format, *args):
-        return
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    server.serve_forever()
-
-# ============================================================
-# CẤU HÌNH MẠNG
-# ============================================================
-REQUEST_TIMEOUT = 12
-CONCURRENT_DOWNLOADS = 5
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-}
+# CẤU HÌNH
+BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
+CONCURRENT_DOWNLOADS = 10 
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"}
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
-def fetch(url):
-    try:
-        res = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-        res.raise_for_status()
-        return res
-    except Exception:
-        return None
-
 def get_soup(url):
-    res = fetch(url)
-    return BeautifulSoup(res.text, "lxml") if res else None
+    try:
+        res = session.get(url, timeout=15)
+        return BeautifulSoup(res.text, "lxml")
+    except: return None
 
-def clean_text(text):
-    return re.sub(r"\s+", " ", text or "").strip()
-
-# ============================================================
-# BỘ QUÉT DỮ LIỆU ĐA TRANG (MONGTRUYEN / TRUYENFULL / WORDPRESS)
-# ============================================================
-def extract_story_info(story_url):
-    soup = get_soup(story_url)
-    if not soup: raise RuntimeError("Không thể kết nối đến trang truyện.")
-    
-    title = ""
-    for selector in ["h1.title", "h1.entry-title", "h1", "meta[property='og:title']"]:
-        el = soup.select_one(selector)
-        if el:
-            title = clean_text(el.get("content", "")) if el.name == "meta" else clean_text(el.get_text())
-            if title: break
-    
-    cover_url = None
-    for selector in ["meta[property='og:image']", ".book-info img", ".info-holder img"]:
-        el = soup.select_one(selector)
-        if el:
-            src = el.get("content") or el.get("src")
-            if src and not src.endswith("avatar"):
-                cover_url = urljoin(story_url, src)
-                break
-    return title or "Truyện", cover_url, soup
-
+# BỘ QUÉT TỐI ƯU
 def parse_all_chapters(story_url, main_soup):
     chapters = []
-    seen_urls = set()
-
-    # 1. TRANG MONGTRUYEN
-    if "mongtruyen" in story_url:
-        clean_base = story_url.split('?')[0].split('#')[0]
-        for page_num in range(1, 100):
-            p_url = f"{clean_base}?page={page_num}"
-            soup = main_soup if page_num == 1 else get_soup(p_url)
-            if not soup: break
-            
-            found = 0
-            for a in soup.find_all("a", href=True):
-                href = urljoin(p_url, a.get("href"))
-                if re.search(r"/(?:chuong|chapter|chap)[-_/]\d+", href, flags=re.I) and href not in seen_urls:
-                    seen_urls.add(href)
-                    chapters.append({"name": clean_text(a.get_text()), "url": href})
-                    found += 1
-            if found == 0: break
-            time.sleep(0.1)
-
-    # 2. TRANG WORDPRESS
-    elif "wordpress.com" in story_url or main_soup.select_one(".entry-content"):
-        content_area = main_soup.select_one(".entry-content") or main_soup.select_one(".post-content")
-        if content_area:
-            for a in content_area.find_all("a", href=True):
-                href = urldefrag(urljoin(story_url, a.get("href")))[0]
-                text = clean_text(a.get_text())
-                if href and href not in seen_urls and len(text) > 1:
-                    seen_urls.add(href)
-                    chapters.append({"name": text, "url": href})
-
-    # 3. TRUYỆN FULL (CẢI TIẾN: VÉT CẠN THEO SỐ TRANG)
-    else:
-        base_url = urldefrag(story_url)[0].rstrip("/")
-        # Lấy tổng số trang từ pagination
-        max_page = 1
-        page_links = main_soup.select(".pagination a")
-        for a in page_links:
-            if a.get_text().isdigit():
-                max_page = max(max_page, int(a.get_text()))
-        
-        for p in range(1, max_page + 1):
-            p_url = f"{base_url}/trang-{p}/" if p > 1 else base_url
-            soup = get_soup(p_url)
-            if not soup: continue
-            for a in soup.select("#list-chapter a, .list-chapter a"):
-                href = urljoin(p_url, a.get("href", ""))
-                if href and href not in seen_urls:
-                    seen_urls.add(href)
-                    chapters.append({"name": clean_text(a.get_text()), "url": href})
+    seen = set()
+    base_url = urldefrag(story_url)[0].rstrip("/")
+    
+    # TruyenFull Logic: Vét cạn số trang
+    max_page = 1
+    for a in main_soup.select(".pagination a"):
+        txt = a.get_text()
+        if txt.isdigit(): max_page = max(max_page, int(txt))
+    
+    for p in range(1, max_page + 1):
+        p_url = f"{base_url}/trang-{p}/" if p > 1 else base_url
+        soup = main_soup if p == 1 else get_soup(p_url)
+        if not soup: continue
+        for a in soup.select("#list-chapter a"):
+            href = urljoin(p_url, a.get("href", ""))
+            if href and href not in seen:
+                seen.add(href)
+                chapters.append({"name": a.get_text().strip(), "url": href})
     return chapters
 
-def download_chapter_content(chap_info):
-    soup = get_soup(chap_info["url"])
+def download_chap(url):
+    soup = get_soup(url)
     if not soup: return None
-    content_el = soup.select_one(".chapter-content, .box-chap, .entry-content, .post-content")
-    if not content_el: return None
-    for tag in content_el.find_all(["script", "style", "iframe", "a"]): tag.decompose()
-    return str(content_el)
+    content = soup.select_one(".chapter-content") or soup.select_one("#chapter-c")
+    if not content: return None
+    for t in content.find_all(["script", "style", "ins", "a", "div.ads"]): t.decompose()
+    return str(content)
 
-# ============================================================
-# TELEGRAM BOT HANDLER (Tương tự code cũ phía trên)
-# ============================================================
+# TELEGRAM HANDLER
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
-    urls = re.findall(r"https?://[^\s]+", update.message.text)
-    if not urls: return
-    story_url = urls[0]
+    url = re.findall(r"https?://[^\s]+", update.message.text or "")
+    if not url: return
+    
     status = await update.message.reply_text("⏳ Đang kết nối...")
     try:
-        title, cover_url, main_soup = await asyncio.to_thread(extract_story_info, story_url)
-        chapters = await asyncio.to_thread(parse_all_chapters, story_url, main_soup)
-        await status.edit_text(f"📚 **{title}**\n✅ Tìm thấy {len(chapters)} chương. Đang tải...")
-        # (Phần đóng gói EPUB giữ nguyên như code trước)...
-        # [Để tránh quá dài, bạn copy đoạn đóng gói EPUB từ code trước vào đây]
+        # Lấy info
+        main_soup = get_soup(url[0])
+        title = main_soup.select_one("h1").get_text() if main_soup else "Truyện"
+        chapters = parse_all_chapters(url[0], main_soup)
+        
+        await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Bắt đầu tải...")
+
+        # Tải chương với %
+        results = {}
+        sem = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
+        async def fetch_task(idx, c):
+            async with sem:
+                content = await asyncio.to_thread(download_chap, c["url"])
+                results[idx] = content
+                return True
+
+        tasks = [fetch_task(i, c) for i, c in enumerate(chapters)]
+        
+        # Hiển thị %
+        done = 0
+        for future in asyncio.as_completed(tasks):
+            await future
+            done += 1
+            if done % 5 == 0 or done == len(chapters): # Cập nhật mỗi 5 chương để không bị spam
+                pct = int((done / len(chapters)) * 100)
+                await status.edit_text(f"📚 {title}\n⏳ Đang tải: {done}/{len(chapters)} chương ({pct}%)\n" + "█"*(pct//10) + "▒"*(10-pct//10))
+
+        # Đóng gói EPUB
+        await status.edit_text(f"📦 Đang đóng gói EPUB...")
+        book = epub.EpubBook()
+        book.set_title(title)
+        
+        for i, chap in enumerate(chapters):
+            content = results.get(i)
+            if not content: continue
+            c = epub.EpubHtml(title=chap["name"], file_name=f"c{i}.xhtml")
+            c.content = f"<h2>{chap['name']}</h2>{content}"
+            book.add_item(c)
+            book.spine.append(c)
+        
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        file_out = "truyen.epub"
+        epub.write_epub(file_out, book)
+        
+        await update.message.reply_document(document=open(file_out, "rb"), caption=f"✅ {title} - Đã xong!")
+        await status.delete()
+        os.remove(file_out)
+        
     except Exception as e:
         await status.edit_text(f"❌ Lỗi: {e}")
 
-def main():
-    threading.Thread(target=run_web_server, daemon=True).start()
+# Mấy hàm chạy bot giữ nguyên...
+if __name__ == "__main__":
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
