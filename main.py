@@ -21,7 +21,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write("Bot Truyen Multi-Source đang chạy!".encode('utf-8'))
+        self.wfile.write("Bot Truyen MongTruyen Engine đang chạy!".encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -62,25 +62,23 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 # ============================================================
-# BỘ BẮT NỘI DUNG TƯƠNG THÍCH ĐA TRANG
+# BỘ BẮT NỘI DUNG DÀNH RIÊNG CHO MONGTRUYEN & CÁC TRANG KHÁC
 # ============================================================
 def extract_story_info(story_url):
     soup = get_soup(story_url)
     if not soup:
         raise RuntimeError("Không thể kết nối đến trang truyện.")
     
-    # Tiêu đề
     title = ""
     for selector in ["h1.title", "h1", ".book-info h1", "meta[property='og:title']"]:
         el = soup.select_one(selector)
         if el:
             title = clean_text(el.get("content", "")) if el.name == "meta" else clean_text(el.get_text())
             if title: break
-    title = title or "Truyện"
+    title = title or "Truyện MongTruyen"
 
-    # Ảnh bìa
     cover_url = None
-    for selector in ["meta[property='og:image']", ".book-info img", ".info-holder img", ".book-img img"]:
+    for selector in ["meta[property='og:image']", ".book-info img", ".info-holder img", ".book-img img", ".col-info img"]:
         el = soup.select_one(selector)
         if el:
             src = el.get("content") if el.name == "meta" else (el.get("src") or el.get("data-src"))
@@ -94,8 +92,33 @@ def parse_all_chapters(story_url, main_soup):
     chapters = []
     seen_urls = set()
 
-    # 1. TRUYỆN FULL
-    if "truyenfull" in story_url:
+    # 1. TRANG MONGTRUYEN.COM
+    if "mongtruyen" in story_url:
+        base_url = urldefrag(story_url)[0].split('?')[0]
+        current_url = base_url
+        visited_pages = set()
+        
+        while current_url and current_url not in visited_pages:
+            visited_pages.add(current_url)
+            soup = get_soup(current_url) if current_url != story_url else main_soup
+            if not soup: break
+
+            # Lấy toàn bộ link chương trong danh sách
+            for a in soup.select("ul.list-chapter a, #list-chapter a, .works-chapter-list a"):
+                href = urljoin(current_url, a.get("href", ""))
+                if href and href not in seen_urls:
+                    seen_urls.add(href)
+                    chapters.append({"name": clean_text(a.get_text()), "url": href})
+
+            # Chuyển trang (Phân trang của MongTruyen)
+            next_a = soup.select_one(".pagination .next a, .pagination a[rel='next']")
+            if next_a and next_a.get("href"):
+                current_url = urljoin(current_url, next_a.get("href"))
+            else:
+                break
+
+    # 2. TRUYỆN FULL
+    elif "truyenfull" in story_url:
         current_url = urldefrag(story_url)[0].rstrip("/")
         visited_pages = set()
         while current_url and current_url not in visited_pages:
@@ -107,24 +130,14 @@ def parse_all_chapters(story_url, main_soup):
                 href = urljoin(current_url, a.get("href", ""))
                 if href and href not in seen_urls:
                     seen_urls.add(href)
-                    name = clean_text(a.get_text())
-                    chapters.append({"name": name, "url": href})
+                    chapters.append({"name": clean_text(a.get_text()), "url": href})
             
-            # Tìm trang kế tiếp
             next_a = soup.select_one(".pagination .next a, .pagination a[links-next]")
             current_url = urljoin(current_url, next_a.get("href")) if next_a and next_a.get("href") else None
 
-    # 2. TÀNG THƯ VIỆN
-    elif "tangthuvien" in story_url:
-        for a in main_soup.select(".story-chap-list a, #list-chap a"):
-            href = urljoin(story_url, a.get("href", ""))
-            if href and href not in seen_urls:
-                seen_urls.add(href)
-                chapters.append({"name": clean_text(a.get_text()), "url": href})
-
-    # 3. MÊ TRUYỆN CHỮ / DẠNG KHÁC (GENERIC)
+    # 3. MẶC ĐỊNH CHO CÁC TRANG KHÁC
     else:
-        for a in main_soup.select("a[href*='/chuong']"):
+        for a in main_soup.select("a[href*='/chuong'], a[href*='chapter']"):
             href = urljoin(story_url, a.get("href", ""))
             if href and href not in seen_urls:
                 seen_urls.add(href)
@@ -137,8 +150,8 @@ def download_chapter_content(chap_info):
     if not soup: return None
     
     content_el = None
-    # Selector nội dung theo từng trang
-    for selector in [".chapter-c", "#chapter-c", ".chap-content", "#chap-content", ".reading-content", ".content-body"]:
+    # Selector thẻ chứa nội dung của MongTruyen và các trang khác
+    for selector in [".chapter-content", ".box-chap", "#chapter-c", ".chapter-c", ".reading-content", ".content-body"]:
         el = soup.select_one(selector)
         if el and len(clean_text(el.get_text())) > 50:
             content_el = el
@@ -146,8 +159,7 @@ def download_chapter_content(chap_info):
             
     if not content_el: return None
     
-    # Dọn dẹp rác quảng cáo
-    for tag in content_el.find_all(["script", "style", "iframe", "form", "ins", "a"]):
+    for tag in content_el.find_all(["script", "style", "iframe", "form", "ins", "a", "button"]):
         tag.decompose()
         
     return str(content_el)
@@ -159,11 +171,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     urls = re.findall(r"https?://[^\s]+", update.message.text)
     if not urls:
-        await update.message.reply_text("❌ Vui lòng gửi một đường link truyện hợp lệ!")
+        await update.message.reply_text("❌ Vui lòng gửi link truyện MongTruyen hoặc TruyenFull hợp lệ!")
         return
 
     story_url = urls[0]
-    status = await update.message.reply_text("⏳ Đang kết nối tới trang truyện...")
+    status = await update.message.reply_text("⏳ Đang kết nối tới MongTruyen...")
 
     try:
         title, cover_url, main_soup = await asyncio.to_thread(extract_story_info, story_url)
@@ -175,7 +187,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         total = len(chapters)
-        await status.edit_text(f"📚 **{title}**\n✅ Tìm thấy {total} chương.\n🚀 Đang tải dữ liệu chuẩn Kindle...")
+        await status.edit_text(f"📚 **{title}**\n✅ Tìm thấy {total} chương.\n🚀 Đang tải nội dung chuẩn Kindle...")
 
         downloaded_data = {}
         loop = asyncio.get_event_loop()
@@ -197,13 +209,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception: pass
                 last_update = time.time()
 
-        await status.edit_text(f"📚 **{title}**\n📦 Đang tối ưu định dạng EPUB cho Kindle...")
+        await status.edit_text(f"📚 **{title}**\n📦 Đang đóng gói file EPUB...")
 
-        # ============================================================
-        # TẠO FILE EPUB ĐÃ TỐI ƯU CHO KINDLE
-        # ============================================================
+        # Định dạng EPUB tối ưu Kindle
         book = epub.EpubBook()
-        book.set_identifier("kindle-epub-" + str(abs(hash(title))))
+        book.set_identifier("kindle-mongtruyen-" + str(abs(hash(title))))
         book.set_title(title)
         book.set_language("vi")
 
@@ -212,7 +222,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if c_res and len(c_res.content) > 1000:
                 book.set_cover("cover.jpg", c_res.content)
 
-        # CSS chuyên dụng cho màn hình E-Ink Kindle
         kindle_css = """
             @page { margin: 8pt; }
             body {
@@ -272,7 +281,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(
                 document=f,
                 filename=os.path.basename(file_out),
-                caption=f"📖 {title}\n✅ File EPUB đã tối ưu chuẩn Kindle!\n👉 Dùng amazon.com/sendtokindle để gửi vào máy."
+                caption=f"📖 {title}\n✅ Đã tải từ MongTruyen chuẩn Kindle!"
             )
         await status.delete()
         if os.path.exists(file_out): os.remove(file_out)
