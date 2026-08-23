@@ -3,11 +3,8 @@ import os
 import re
 import time
 import threading
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, urljoin
 import cloudscraper
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -36,13 +33,6 @@ def run_web_server():
 # CẤU HÌNH BOT & CHỐNG TƯỜNG LỬA (CLOUDSCRAPER)
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
-
-# Cấu hình email gửi Kindle (Lấy từ biến môi trường trên Render)
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")       # Email của bạn (ví dụ: gmail)
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "") # Mật khẩu ứng dụng (App Password)
-KINDLE_EMAIL = os.getenv("KINDLE_EMAIL", "")       # Email Kindle của bạn (@kindle.com)
 
 scraper = cloudscraper.create_scraper(
     browser={
@@ -79,38 +69,13 @@ def download_chapter(url):
         
     return str(content)
 
-def send_to_kindle_email(file_path, title):
-    if not SENDER_EMAIL or not SENDER_PASSWORD or not KINDLE_EMAIL:
-        return False, "Chưa cấu hình thông tin Email trên Render."
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = KINDLE_EMAIL
-        msg['Subject'] = f"Convert {title}"
-
-        msg.attach(MIMEText("Gửi file EPUB từ Telegram Bot tự động."))
-
-        with open(file_path, "rb") as f:
-            part = MIMEApplication(f.read(), Name=os.path.basename(file_path))
-            part.add_header('Content-Disposition', 'attachment', filename=os.path.basename(file_path))
-            msg.attach(part)
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.sendmail(SENDER_EMAIL, KINDLE_EMAIL, msg.as_string())
-        server.quit()
-        return True, "Đã gửi thành công vào Kindle!"
-    except Exception as e:
-        return False, f"Lỗi gửi Kindle: {str(e)}"
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url: return
     
-    status = await update.message.reply_text("⏳ Đang kết nối và quét danh sách chương (Hỗ trợ đa trang)...")
+    status = await update.message.reply_text("⏳ Đang kết nối và quét danh sách chương chuẩn xác...")
     
-    story_url = url[0]
+    story_url = url[0].strip()
     main_soup = get_soup(story_url)
     if not main_soup:
         await status.edit_text("❌ Không thể kết nối tới trang truyện. Web có thể đang chặn hoặc sai link.")
@@ -127,9 +92,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if img_tag and img_tag.get('src'):
         cover_url = img_tag['src']
 
-    # --- QUÉT PHÂN TRANG THÔNG MINH CHO CÁC TRANG CÙNG CẤU TRÚC ---
+    # Xác định domain và đường dẫn gốc của truyện để lọc link chống lấy nhầm
+    parsed_url = urlparse(story_url)
+    base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    # Lấy phần path của truyện (ví dụ: /truyen-full/ten-truyen/) để check xem link chương có thuộc về truyện này không
+    story_path = parsed_url.path.rstrip('/')
+
+    # --- QUÉT PHÂN TRANG THÔNG MINH & CHỐNG LẤY NHẦM TRUYỆN KHÁC ---
     links = []
-    base_domain = "https://" + story_url.split('/')[2]
     current_page_url = story_url
     page_num = 1
     
@@ -146,6 +116,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             href = a.get('href', '')
             if href:
                 full_url = href if href.startswith("http") else base_domain + href
+                
+                # KIỂM TRA NGHIÊM NGẶT: Link chương phải thuộc đúng path của truyện này
+                # Tránh việc quét trúng các chương đề cử của truyện khác ở footer/sidebar
+                if story_path not in full_url:
+                    continue
+
                 text = a.get_text().strip()
                 if text and not any(l['url'] == full_url for l in links):
                     links.append({"name": text, "url": full_url})
@@ -181,20 +157,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         time.sleep(0.3)
 
-    # Fallback dự phòng quét toàn bộ thẻ a nếu phân trang không khớp
-    if len(links) < 5:
-        for a in main_soup.find_all("a", href=True):
-            if "chuong-" in a['href'] or "hoi-" in a['href'] or "chapter-" in a['href']:
-                full_url = a['href'] if a['href'].startswith("http") else base_domain + a['href']
-                text = a.get_text().strip()
-                if text and not any(l['url'] == full_url for l in links):
-                    links.append({"name": text, "url": full_url})
-
     if not links:
-        await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn truyện.")
+        await status.edit_text("❌ Không tìm thấy chương nào hoặc link không hợp lệ.")
         return
         
-    await status.edit_text(f"📚 {title}\n✅ Quét thành công {len(links)} chương. Đang tải nội dung...")
+    await status.edit_text(f"📚 {title}\n✅ Quét thành công {len(links)} chương chuẩn xác. Đang tải nội dung...")
     
     book = epub.EpubBook()
     book.set_identifier('truyen_' + re.sub(r'\W+', '', title))
@@ -234,7 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
         return
 
-    # Cấu hình Mục lục (TOC) chuẩn Kindle
+    # Cấu hình Mục lục (TOC) chuẩn EPUB
     book.toc = tuple(chapters_list)
     book.spine = ['nav'] + chapters_list
 
@@ -245,17 +212,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = f"{safe_title}.epub"
     epub.write_epub(file_name, book)
     
-    # 1. Gửi file trực tiếp qua Telegram
-    await status.edit_text("⬆️ Đang gửi file EPUB qua Telegram và Kindle...")
-    await update.message.reply_document(
-        document=open(file_name, "rb"), 
-        caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương + Ảnh bìa & Mục lục chuẩn Kindle!"
-    )
-    
-    # 2. Gửi file qua Email Kindle (nếu đã cấu hình)
-    if KINDLE_EMAIL and SENDER_EMAIL:
-        success, msg_note = send_to_kindle_email(file_name, title)
-        await update.message.reply_text(f"📧 Trạng thái gửi Kindle: {msg_note}")
+    # Gửi file trực tiếp qua Telegram
+    await status.edit_text("⬆️ Đang gửi file EPUB qua Telegram...")
+    with open(file_name, "rb") as f:
+        await update.message.reply_document(
+            document=f, 
+            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương chuẩn xác + Ảnh bìa & Mục lục đầy đủ!"
+        )
 
     await status.delete()
     if os.path.exists(file_name):
