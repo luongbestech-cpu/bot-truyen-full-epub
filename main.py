@@ -83,21 +83,24 @@ def download_chap(url):
     if not container:
         container = soup
 
-    # Dọn dẹp triệt để các thẻ rác, quảng cáo, menu điều hướng, sidebar
-    for garbage in container.select(".entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside, .box-h, .truyen-hot, .list-truyen, .chapter-nav"):
-        garbage.decompose()
-
-    # Bỏ toàn bộ ảnh và khung quảng cáo/ebook
-    for img in container.find_all("img"):
-        img.decompose()
+    # Dọn dẹp các thành phần thừa, nút bấm, hình ảnh, quảng cáo
+    for media in container.find_all(["img", "svg", "iframe", "picture", "hr"]):
+        media.decompose()
         
-    for box in container.find_all(["div", "a"], class_=re.compile("ads|banner|ebook|download|promo", re.I)):
-        box.decompose()
+    for box in container.find_all(True):
+        classes = " ".join(box.get("class", [])) if box.get("class") else ""
+        if re.search(r"ads|banner|ebook|download|promo|nav|menu|box-h|truyen-hot", classes, re.I):
+            box.decompose()
 
-    paragraphs = container.find_all(["p", "div", "a"])
-    valid_p = []
-    
-    # Bổ sung các từ khóa điều hướng "chương trước", "chương sau" vào đây
+    # Tìm tên chương thực tế bên trong trang (Ví dụ: "Chương 1: Khải hoàn")
+    real_title = ""
+    for h in container.find_all(["h1", "h2", "h3", "div", "p"]):
+        text = h.get_text().strip()
+        if re.match(r"^(chương|chuong|hồi|hoi)\s*\d+", text, re.I) and len(text) < 100:
+            real_title = text
+            h.decompose() # Xóa tiêu đề thừa nằm lẫn trong nội dung để không bị lặp
+            break
+
     ignore_keywords = [
         "bỏ qua nội dung", "trang chủ", "lượt xem:", "cập nhật:", "chia sẻ", 
         "thích", "đang tải", "có liên quan", "báo lỗi", "khám phá thêm", 
@@ -105,16 +108,27 @@ def download_chap(url):
         "phím mũi tên", "sang chương", "truyện hot mới", "tải ebook",
         "chương trước", "chương sau", "« chương", "chương tiếp »"
     ]
-    
+
+    # Quét và xóa các thẻ chứa từ khóa rác điều hướng trước đó
+    for element in list(container.find_all(True)):
+        if element.parent is None:
+            continue
+        text = element.get_text().strip().lower()
+        if any(kw in text for kw in ignore_keywords) and len(text) < 300:
+            if element not in [container, soup.body]:
+                element.decompose()
+
+    paragraphs = container.find_all(["p", "div"])
+    valid_p = []
     seen_texts = set()
+    
     for p in paragraphs:
         text = p.get_text().strip()
         if not text:
             continue
         lower_text = text.lower()
         
-        # Lọc bỏ các đoạn ngắn chứa từ khóa rác hoặc điều hướng
-        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 150:
+        if any(kw in lower_text for kw in ignore_keywords):
             continue
             
         if text in seen_texts:
@@ -123,10 +137,8 @@ def download_chap(url):
             
         valid_p.append(str(p))
         
-    if valid_p:
-        return "".join(valid_p)
-        
-    return str(container)
+    content_html = "".join(valid_p) if valid_p else str(container)
+    return real_title, content_html
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url_match = re.findall(r"https?://[^\s]+", update.message.text or "")
@@ -262,7 +274,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     results = {}
     for i, c in enumerate(links):
-        results[i] = download_chap(c["url"])
+        real_title, content = download_chap(c["url"])
+        results[i] = {"name": real_title if real_title else c["name"], "content": content}
+        
         if i % 15 == 0 or i == len(links) - 1:
             pct = int(((i + 1) / len(links)) * 100)
             try:
@@ -287,9 +301,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chapters_list = []
     success_count = 0
     for i, c in enumerate(links):
-        if results.get(i):
-            chap = epub.EpubHtml(title=c["name"], file_name=f"chap_{i+1}.xhtml")
-            chap.content = f"<h2>{c['name']}</h2>{results[i]}"
+        chap_data = results.get(i)
+        if chap_data and chap_data["content"]:
+            chap_title = chap_data["name"]
+            chap = epub.EpubHtml(title=chap_title, file_name=f"chap_{i+1}.xhtml")
+            chap.content = f"<h2>{chap_title}</h2>{chap_data['content']}"
             book.add_item(chap)
             chapters_list.append(chap)
             success_count += 1
@@ -312,7 +328,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_name, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Đã lọc sạch cả chữ chương trước/sau)!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Đã dọn sạch rác, giữ đúng tên chương và nội dung)!"
         )
 
     await status.delete()
