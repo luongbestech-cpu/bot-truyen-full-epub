@@ -5,7 +5,9 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, urljoin, urldefrag
-import cloudscraper
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from telegram import Update
@@ -30,25 +32,24 @@ def run_web_server():
     server.serve_forever()
 
 # ============================================================
-# CẤU HÌNH BOT & CHỐNG TƯỜNG LỬA (CLOUDSCRAPER)
+# CẤU HÌNH SESSION & CHỐNG CHẶN (REQUESTS + RETRY)
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
 
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
-    }
-)
+session = requests.Session()
+retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+session.mount('https://', HTTPAdapter(max_retries=retries))
 
 def get_soup(url):
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": url
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": url,
+            "Connection": "keep-alive"
         }
-        response = scraper.get(url, headers=headers, timeout=35)
+        response = session.get(url, headers=headers, timeout=35)
         if response.status_code == 200:
             return BeautifulSoup(response.text, "lxml")
     except Exception as e:
@@ -69,7 +70,7 @@ def download_chapter(url):
     soup = get_soup(url)
     if not soup: return None
     
-    # Mở rộng các khung chứa nội dung dành riêng cho Wikidich và TruyenFull
+    # Mở rộng toàn bộ các khung chứa nội dung của Wikidich, TruyenFull và các web khác
     content = (soup.select_one("#content") or
                soup.select_one(".box-content") or
                soup.select_one(".chapter-content") or 
@@ -77,11 +78,12 @@ def download_chapter(url):
                soup.select_one("#chapter-c") or 
                soup.select_one(".chapter-c") or 
                soup.select_one(".entry-content") or 
-               soup.select_one(".post-content"))
+               soup.select_one(".post-content") or
+               soup.select_one(".rd-container"))
                
     if not content: return None
     
-    for tag in content.find_all(["script", "style", "div", "ins", "iframe", "button", "ads"]):
+    for tag in content.find_all(["script", "style", "div", "ins", "iframe", "button", "ads", ".ads"]):
         tag.decompose()
         
     return str(content)
@@ -209,7 +211,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cover_url:
         try:
             full_cover_url = cover_url if cover_url.startswith("http") else base_domain + cover_url
-            img_data = scraper.get(full_cover_url, timeout=15).content
+            img_data = session.get(full_cover_url, timeout=15).content
             book.set_cover("cover.jpg", img_data)
         except Exception as e:
             print(f"Lỗi tải ảnh bìa: {e}")
@@ -252,7 +254,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_name, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương + Chống chặn thành công!"
+            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương + Vượt chặn Wikidich/TruyenFull thành công!"
         )
 
     await status.delete()
