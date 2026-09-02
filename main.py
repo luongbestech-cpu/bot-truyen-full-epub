@@ -52,19 +52,21 @@ def get_soup(url):
     return None
 
 def extract_chapter_number(name):
-    """Trích xuất số từ tên chương để sắp xếp chuẩn xác 1, 2, 3... 126, 127, 128"""
+    """Trích xuất số từ tên chương để sắp xếp chuẩn xác, đẩy chương cuối và ngoại truyện xuống cuối"""
+    name_lower = name.lower()
+    # Nếu tên có chữ "cuối", "ngoại truyện", "extra", đẩy xuống cuối cùng
+    if "cuối" in name_lower or "ngoại" in name_lower or "ngoai" in name_lower or "extra" in name_lower:
+        return 999999
+        
     numbers = re.findall(r'\d+', name)
     if numbers:
         return int(numbers[0])
-    if "ngoại" in name.lower() or "ngoai" in name.lower() or "extra" in name.lower():
-        return 999999
     return 0
 
 def download_chapter(url):
     soup = get_soup(url)
     if not soup: return None
     
-    # Mở rộng các class chứa nội dung phổ biến của TruyenFull, Wikidich và các trang khác
     content = (soup.select_one(".chapter-content") or 
                soup.select_one("#chapter-content") or
                soup.select_one("#chapter-c") or 
@@ -96,7 +98,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "|" in title:
         title = title.split('|')[0].strip()
         
-    # Lấy ảnh bìa
     cover_url = None
     img_tag = main_soup.select_one(".book img") or main_soup.select_one(".truyen-info img") or main_soup.select_one(".book-info img") or main_soup.select_one("article img")
     if img_tag:
@@ -110,7 +111,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_wikidich = "wikidich" in story_url.lower()
 
     if is_wikidich:
-        # --- XỬ LÝ RIÊNG CHO WIKIDICH (100 chương/trang, phân trang bằng ?page=N) ---
         max_page = 1
         pagination = main_soup.select(".pagination a, .page-item a")
         for p in pagination:
@@ -139,7 +139,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             links.append({"name": text, "url": full_url})
             time.sleep(0.2)
     else:
-        # --- XỬ LÝ TRUYENFULL VÀ CÁC TRANG TƯƠNG TỰ (Quét thông minh chống lệch truyện) ---
         current_page_url = story_url
         page_num = 1
         
@@ -189,7 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
             time.sleep(0.3)
 
-    # Sắp xếp lại thứ tự chương chuẩn số học
+    # Sắp xếp lại thứ tự chương chuẩn số học (đã sửa lỗi Chương cuối bị nhảy lên đầu)
     links.sort(key=lambda x: extract_chapter_number(x['name']))
 
     if not links:
@@ -249,7 +248,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_name, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương + Ảnh bìa & Sắp xếp chuẩn xác!"
+            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương + Sắp xếp chuẩn xác (Đã fix lỗi Chương cuối)!"
         )
 
     await status.delete()
