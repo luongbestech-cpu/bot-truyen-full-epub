@@ -3,6 +3,7 @@ import os
 import re
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, urljoin, urldefrag
 import cloudscraper
@@ -34,17 +35,19 @@ def run_web_server():
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
 
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
-    }
-)
+def get_scraper():
+    return cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
 
 def get_content(url):
+    scraper = get_scraper()
     try:
-        res = scraper.get(url, timeout=30)
+        res = scraper.get(url, timeout=20)
         if res.status_code == 200:
             return BeautifulSoup(res.text, "lxml")
     except Exception as e:
@@ -63,7 +66,7 @@ def extract_chapter_number(name):
 
 def download_chap(url):
     soup = get_content(url)
-    if not soup: return None
+    if not soup: return "", None
     
     container = (
         soup.select_one(".chapter-text") or
@@ -83,7 +86,7 @@ def download_chap(url):
     if not container:
         container = soup
 
-    # Dọn dẹp các thành phần thừa, nút bấm, hình ảnh, quảng cáo
+    # Dọn dẹp rác, hình ảnh, quảng cáo thừa
     for media in container.find_all(["img", "svg", "iframe", "picture", "hr"]):
         media.decompose()
         
@@ -92,13 +95,13 @@ def download_chap(url):
         if re.search(r"ads|banner|ebook|download|promo|nav|menu|box-h|truyen-hot", classes, re.I):
             box.decompose()
 
-    # Tìm tên chương thực tế bên trong trang (Ví dụ: "Chương 1: Khải hoàn")
+    # Tìm chính xác tên chương thực tế bên trong trang
     real_title = ""
     for h in container.find_all(["h1", "h2", "h3", "div", "p"]):
         text = h.get_text().strip()
         if re.match(r"^(chương|chuong|hồi|hoi)\s*\d+", text, re.I) and len(text) < 100:
             real_title = text
-            h.decompose() # Xóa tiêu đề thừa nằm lẫn trong nội dung để không bị lặp
+            h.decompose()
             break
 
     ignore_keywords = [
@@ -109,7 +112,6 @@ def download_chap(url):
         "chương trước", "chương sau", "« chương", "chương tiếp »"
     ]
 
-    # Quét và xóa các thẻ chứa từ khóa rác điều hướng trước đó
     for element in list(container.find_all(True)):
         if element.parent is None:
             continue
@@ -149,7 +151,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     main_soup = get_content(story_url)
     if not main_soup:
-        await status.edit_text("❌ Không thể kết nối tới trang truyện. Web có thể đang chặn hoặc sai link.")
+        await status.edit_text("❌ Không thể kết nối tới trang truyện.")
         return
         
     og_title = main_soup.find("meta", property="og:title")
@@ -210,7 +212,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if is_chap and len(text) < 80:
                     if ("chuong-" in href or "/chap-" in href or "id=" in href) and not any(c['url'] == href for c in links):
                         links.append({"name": text, "url": href})
-            time.sleep(0.3)
     else:
         current_page_url = story_url
         page_num = 1
@@ -220,8 +221,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not soup: break
                 
             chapter_tags = soup.select("#list-chapter a, .list-chapter a, .chapter-list a, .zaraz-list a, a")
-            if not chapter_tags:
-                break
+            if not chapter_tags: break
                 
             new_chapters_in_page = 0
             for a in chapter_tags:
@@ -239,8 +239,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             links.append({"name": text, "url": full_url})
                             new_chapters_in_page += 1
                         
-            if new_chapters_in_page == 0:
-                break
+            if new_chapters_in_page == 0: break
                 
             pagination_links = soup.select(".pagination a, .pages a")
             next_url = None
@@ -262,7 +261,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     page_num += 1
                 else:
                     break
-            time.sleep(0.3)
 
     links.sort(key=lambda x: extract_chapter_number(x['name']))
 
@@ -270,20 +268,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không tìm thấy chương nào hoặc link không hợp lệ.")
         return
         
-    await status.edit_text(f"📚 {title}\n✅ Quét thành công {len(links)} chương. Đang tải nội dung...")
-    
+    await status.edit_text(f"📚 {title}\n⚡ Đã quét xong {len(links)} chương. Đang tải song song cực nhanh...")
+
     results = {}
-    for i, c in enumerate(links):
-        real_title, content = download_chap(c["url"])
-        results[i] = {"name": real_title if real_title else c["name"], "content": content}
-        
-        if i % 15 == 0 or i == len(links) - 1:
-            pct = int(((i + 1) / len(links)) * 100)
-            try:
-                await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(links)})")
-            except:
-                pass
-        time.sleep(0.3)
+    
+    # Sử dụng ThreadPoolExecutor để tải đa luồng cùng lúc 15 chương
+    def task(idx, chap_info):
+        r_title, content = download_chap(chap_info["url"])
+        return idx, {"name": r_title if r_title else chap_info["name"], "content": content}
+
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(task, i, c): i for i, c in enumerate(links)}
+        completed = 0
+        for future in as_completed(futures):
+            idx, res = future.result()
+            results[idx] = res
+            completed += 1
+            if completed % 20 == 0 or completed == len(links):
+                try:
+                    await status.edit_text(f"📚 {title}\n⚡ Đang tải: {int((completed / len(links)) * 100)}%\n({completed}/{len(links)})")
+                except:
+                    pass
 
     book = epub.EpubBook()
     book.set_identifier('truyen_' + re.sub(r'\W+', '', title))
@@ -292,6 +297,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if cover_url:
         try:
+            scraper = get_scraper()
             img_res = scraper.get(cover_url, timeout=15)
             if img_res.status_code == 200:
                 book.set_cover("cover.jpg", img_res.content)
@@ -300,7 +306,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chapters_list = []
     success_count = 0
-    for i, c in enumerate(links):
+    for i in range(len(links)):
         chap_data = results.get(i)
         if chap_data and chap_data["content"]:
             chap_title = chap_data["name"]
@@ -328,7 +334,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_name, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Đã dọn sạch rác, giữ đúng tên chương và nội dung)!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Tải siêu tốc bằng đa luồng, sạch rác)!"
         )
 
     await status.delete()
