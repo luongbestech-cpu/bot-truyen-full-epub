@@ -65,43 +65,54 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
+    # Ưu tiên bắt đúng khung nội dung chính của Wikidich / TruyenFull
     container = (
-        soup.select_one(".entry-content") or 
-        soup.select_one(".elementor-widget-theme-post-content") or 
-        soup.select_one(".post-content") or 
+        soup.select_one(".chapter-text") or
+        soup.select_one(".reading-content") or
+        soup.select_one(".rd-container") or
+        soup.select_one("#content") or
+        soup.select_one(".box-content") or
         soup.select_one(".chapter-content") or 
         soup.select_one("#chapter-content") or
         soup.select_one("#chapter-c") or 
-        soup.select_one(".chapter-c") or
-        soup.select_one("#content") or
+        soup.select_one(".chapter-c") or 
+        soup.select_one(".entry-content") or 
         soup.select_one("article") or
-        soup.select_one(".post-body") or
         soup.body
     )
     
     if not container:
         container = soup
 
-    for garbage in container.select(".entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside"):
+    # Dọn dẹp triệt để các thẻ rác, quảng cáo, menu điều hướng, sidebar
+    for garbage in container.select(".entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside, .box-h, .truyen-hot, .list-truyen"):
         garbage.decompose()
 
-    paragraphs = container.find_all("p")
+    paragraphs = container.find_all(["p", "div"])
     valid_p = []
     
+    # Danh sách từ khóa rác thường xuất hiện ở chân trang hoặc đầu chương
     ignore_keywords = [
         "bỏ qua nội dung", "trang chủ", "lượt xem:", "cập nhật:", "chia sẻ", 
         "thích", "đang tải", "có liên quan", "báo lỗi", "khám phá thêm", 
-        "đăng nhập", "bình luận", "viết:", "lúc", "danh sách"
+        "đăng nhập", "bình luận", "viết:", "lúc", "danh sách",
+        "phím mũi tên", "sang chương", "truyện hot mới", "tải ebook"
     ]
     
+    seen_texts = set()
     for p in paragraphs:
         text = p.get_text().strip()
         if not text:
             continue
         lower_text = text.lower()
         
-        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 80:
+        # Bỏ qua các đoạn ngắn chứa từ khóa rác hoặc bị lặp
+        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 120:
             continue
+            
+        if text in seen_texts:
+            continue
+        seen_texts.add(text)
             
         valid_p.append(str(p))
         
@@ -294,7 +305,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_name, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Đã áp dụng bộ lọc mượt từ code chuẩn)!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Đã lọc sạch rác hướng dẫn & quảng cáo)!"
         )
 
     await status.delete()
