@@ -44,7 +44,11 @@ scraper = cloudscraper.create_scraper(
 
 def get_soup(url):
     try:
-        response = scraper.get(url, timeout=35)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": url
+        }
+        response = scraper.get(url, headers=headers, timeout=35)
         if response.status_code == 200:
             return BeautifulSoup(response.text, "lxml")
     except Exception as e:
@@ -52,9 +56,7 @@ def get_soup(url):
     return None
 
 def extract_chapter_number(name):
-    """Trích xuất số từ tên chương để sắp xếp chuẩn xác, đẩy chương cuối và ngoại truyện xuống cuối"""
     name_lower = name.lower()
-    # Nếu tên có chữ "cuối", "ngoại truyện", "extra", đẩy xuống cuối cùng
     if "cuối" in name_lower or "ngoại" in name_lower or "ngoai" in name_lower or "extra" in name_lower:
         return 999999
         
@@ -67,7 +69,10 @@ def download_chapter(url):
     soup = get_soup(url)
     if not soup: return None
     
-    content = (soup.select_one(".chapter-content") or 
+    # Mở rộng các khung chứa nội dung dành riêng cho Wikidich và TruyenFull
+    content = (soup.select_one("#content") or
+               soup.select_one(".box-content") or
+               soup.select_one(".chapter-content") or 
                soup.select_one("#chapter-content") or
                soup.select_one("#chapter-c") or 
                soup.select_one(".chapter-c") or 
@@ -76,7 +81,7 @@ def download_chapter(url):
                
     if not content: return None
     
-    for tag in content.find_all(["script", "style", "div", "ins", "iframe", "button"]):
+    for tag in content.find_all(["script", "style", "div", "ins", "iframe", "button", "ads"]):
         tag.decompose()
         
     return str(content)
@@ -137,7 +142,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if is_chap and len(text) < 80:
                         if ("chuong-" in full_url or "/chap-" in full_url or "id=" in full_url) and not any(l['url'] == full_url for l in links):
                             links.append({"name": text, "url": full_url})
-            time.sleep(0.2)
+            time.sleep(0.3)
     else:
         current_page_url = story_url
         page_num = 1
@@ -188,7 +193,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
             time.sleep(0.3)
 
-    # Sắp xếp lại thứ tự chương chuẩn số học (đã sửa lỗi Chương cuối bị nhảy lên đầu)
     links.sort(key=lambda x: extract_chapter_number(x['name']))
 
     if not links:
@@ -228,7 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(links)})")
             except:
                 pass
-        time.sleep(0.2)
+        time.sleep(0.3)
 
     if success_count == 0:
         await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
@@ -248,7 +252,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_name, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương + Sắp xếp chuẩn xác (Đã fix lỗi Chương cuối)!"
+            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương + Chống chặn thành công!"
         )
 
     await status.delete()
