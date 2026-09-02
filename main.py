@@ -83,6 +83,21 @@ def download_chap(url):
     if not container:
         container = soup
 
+    # Dọn dẹp triệt để các thẻ rác, quảng cáo, menu điều hướng, sidebar
+    for garbage in container.select(".entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside, .box-h, .truyen-hot, .list-truyen, .chapter-nav"):
+        garbage.decompose()
+
+    # Bỏ toàn bộ ảnh và khung quảng cáo/ebook
+    for img in container.find_all("img"):
+        img.decompose()
+        
+    for box in container.find_all(["div", "a"], class_=re.compile("ads|banner|ebook|download|promo", re.I)):
+        box.decompose()
+
+    paragraphs = container.find_all(["p", "div", "a"])
+    valid_p = []
+    
+    # Bổ sung các từ khóa điều hướng "chương trước", "chương sau" vào đây
     ignore_keywords = [
         "bỏ qua nội dung", "trang chủ", "lượt xem:", "cập nhật:", "chia sẻ", 
         "thích", "đang tải", "có liên quan", "báo lỗi", "khám phá thêm", 
@@ -90,27 +105,6 @@ def download_chap(url):
         "phím mũi tên", "sang chương", "truyện hot mới", "tải ebook",
         "chương trước", "chương sau", "« chương", "chương tiếp »"
     ]
-
-    # Quét và tiêu diệt triệt để mọi thẻ chứa từ khóa rác bất kể cấu trúc lồng nhau
-    for element in list(container.find_all(True)):
-        if element.parent is None:
-            continue
-        text = element.get_text().strip().lower()
-        if any(kw in text for kw in ignore_keywords) and len(text) < 400:
-            if element not in [container, soup.body]:
-                element.decompose()
-
-    # Xóa toàn bộ ảnh, svg, iframe và các thành phần quảng cáo/ebook
-    for media in container.find_all(["img", "svg", "iframe", "picture"]):
-        media.decompose()
-        
-    for box in container.find_all(True):
-        classes = " ".join(box.get("class", [])) if box.get("class") else ""
-        if re.search(r"ads|banner|ebook|download|promo|nav|menu", classes, re.I):
-            box.decompose()
-
-    paragraphs = container.find_all("p")
-    valid_p = []
     
     seen_texts = set()
     for p in paragraphs:
@@ -119,7 +113,8 @@ def download_chap(url):
             continue
         lower_text = text.lower()
         
-        if any(kw in lower_text for kw in ignore_keywords):
+        # Lọc bỏ các đoạn ngắn chứa từ khóa rác hoặc điều hướng
+        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 150:
             continue
             
         if text in seen_texts:
@@ -317,7 +312,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_name, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Đã quét sâu tận gốc mọi khối rác)!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {success_count}/{len(links)} chương (Đã lọc sạch cả chữ chương trước/sau)!"
         )
 
     await status.delete()
