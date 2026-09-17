@@ -10,18 +10,19 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 # ============================================================
-# CẤU HÌNH FLASK & TELEGRAM BOT CHO RENDER (WEBHOOK)
+# CẤU HÌNH BOT & FLASK WEBHOOK
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
   print("❌ Lỗi: Thiếu BOT_TOKEN!")
 
-# Khởi tạo Flask App
 app = Flask(__name__)
 
-# Khởi tạo Telegram Application (Dùng updater=None để tự quản lý webhook)
-application = Application.builder().token(BOT_TOKEN).updater(None).build()
+# Khởi tạo Application của python-telegram-bot
+application = (
+    Application.builder().token(BOT_TOKEN).read_timeout(30).connect_timeout(30).build()
+)
 
 scraper = cloudscraper.create_scraper(
     browser={"browser": "chrome", "platform": "windows", "desktop": True}
@@ -63,7 +64,10 @@ def download_chapter(url):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  url = re.findall(r"https?://[^\s]+", update.message.text or "")
+  if not update.message or not update.message.text:
+    return
+
+  url = re.findall(r"https?://[^\s]+", update.message.text)
   if not url:
     return
 
@@ -159,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page_num += 1
       else:
         break
-    time.sleep(0.3)
+    time.sleep(0.2)
 
   if not links:
     await status.edit_text("❌ Không tìm thấy chương nào hoặc link không hợp lệ.")
@@ -205,7 +209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
       except:
         pass
-    time.sleep(0.2)
+    time.sleep(0.1)
 
   if success_count == 0:
     await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
@@ -236,27 +240,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.remove(file_name)
 
 
-# Đăng ký handler cho bot Telegram
+# Đăng ký handler
 application.add_handler(
     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
 )
 
 
 # ============================================================
-# FLASK WEBHOOK & HEALTH CHECK CHO RENDER
+# FLASK WEBHOOK ROUTES
 # ============================================================
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-  json_string = request.get_data().decode("utf-8")
-  update = Update.de_json(json_string, application.bot)
+  if request.headers.get("content-type") == "application/json":
+    json_data = request.get_json(force=True)
+    update = Update.de_json(json_data, application.bot)
 
-  async def process():
-    await application.update_queue.put(update)
+    # Chạy xử lý thông qua vòng lặp sự kiện bất đồng bộ mượt mà
+    import asyncio
 
-  import asyncio
+    async def run_async():
+      await application.initialize()
+      await application.process_update(update)
 
-  asyncio.run(process())
-  return "OK", 200
+    asyncio.run(run_async())
+    return "OK", 200
+  return "Invalid request", 403
 
 
 @app.route("/")
@@ -264,30 +272,19 @@ def index():
   render_url = os.getenv("RENDER_EXTERNAL_URL")
   if render_url:
     webhook_url = f"{render_url}/{BOT_TOKEN}"
-    import asyncio
+    import requests
 
-  async def set_wh():
-    await application.bot.set_webhook(url=webhook_url)
-
-    asyncio.run(set_wh())
-    return (
-        f"Bot TruyenFull Webhook đang hoạt động tuyệt vời! Trỏ tới:"
-        f" {webhook_url}"
-    ), 200
+    try:
+      requests.get(
+          f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}",
+          timeout=10,
+      )
+    except Exception as e:
+      print(f"Lỗi set webhook tự động: {e}")
+    return f"Bot TruyenFull Webhook đang chạy! Trỏ tới: {webhook_url}", 200
   return "Bot TruyenFull đang hoạt động!", 200
 
 
-# ============================================================
-# KHỞI CHẠY HỆ THỐNG
-# ============================================================
 if __name__ == "__main__":
-  import asyncio
-
-  async def init_bot():
-    await application.initialize()
-    await application.start()
-
-  asyncio.run(init_bot())
-
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
