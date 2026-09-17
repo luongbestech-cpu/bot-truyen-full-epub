@@ -247,13 +247,27 @@ application.add_handler(
 
 
 # ============================================================
-# FLASK WEBHOOK ROUTES
+# FLASK WEBHOOK ROUTES (CÓ CHỐNG LẶP REQUEST)
 # ============================================================
+processed_updates = set()
+
+
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
   if request.headers.get("content-type") == "application/json":
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, application.bot)
+
+    if not update:
+      return "OK", 200
+
+    # Chặn đứng các request bị Telegram gửi lại (retry) do xử lý lâu
+    if update.update_id in processed_updates:
+      return "OK", 200
+
+    processed_updates.add(update.update_id)
+    if len(processed_updates) > 100:
+      processed_updates.pop()
 
     # Chạy xử lý thông qua vòng lặp sự kiện bất đồng bộ mượt mà
     import asyncio
