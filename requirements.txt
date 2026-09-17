@@ -2,5 +2,6 @@ python-telegram-bot
 requests
 beautifulsoup4
 lxml
-ebooklib
+EbookLib
 cloudscraper
+Flask
