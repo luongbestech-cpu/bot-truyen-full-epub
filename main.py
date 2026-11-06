@@ -104,18 +104,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
     story_path = parsed_url.path.rstrip('/')
 
-    # Lấy ảnh bìa
+    # Lấy ảnh bìa chuẩn xác
     cover_url = None
     img_tag = (
         main_soup.select_one(".book img") 
         or main_soup.select_one(".truyen-info img") 
-        or main_soup.select_one(".info-holder img")
-        or main_soup.select_one("article img")
+        or main_soup.select_one(".info img")
+        or main_soup.select_one("div.book img")
         or main_soup.select_one(".img-responsive")
-        or main_soup.select_one(".box-image img")
+        or main_soup.select_one("img[itemprop='image']")
     )
+    
     if img_tag:
-        cover_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src')
+        cover_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src') or img_tag.get('srcset')
+        if cover_url and ' ' in cover_url:
+            cover_url = cover_url.split()[0]
+            
+    if not cover_url:
+        info_section = main_soup.select_one(".col-info, .truyen-info, .book-info")
+        if info_section:
+            first_img = info_section.select_one("img")
+            if first_img:
+                cover_url = first_img.get('data-src') or first_img.get('src')
 
     # Quét phân trang
     links = []
@@ -183,16 +193,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     book.set_title(title)
     book.set_language('vi')
     
+    # Tải và thiết lập ảnh bìa vào EPUB
     if cover_url:
         try:
-            full_cover_url = cover_url if cover_url.startswith("http") else base_domain + cover_url
+            full_cover_url = urljoin(story_url, cover_url)
+            print(f"DEBUG Cover URL: {full_cover_url}")
             img_response = scraper.get(full_cover_url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Referer': base_domain
             }, timeout=15)
             
-            if img_response.status_code == 200:
+            if img_response.status_code == 200 and len(img_response.content) > 500:
                 book.set_cover("cover.jpg", img_response.content)
+                print("DEBUG: Đã set ảnh bìa thành công vào EPUB!")
+            else:
+                print(f"DEBUG: Tải ảnh bìa thất bại, status code: {img_response.status_code}")
         except Exception as e:
             print(f"Lỗi tải ảnh bìa: {e}")
 
