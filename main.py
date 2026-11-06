@@ -86,17 +86,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "|" in title:
         title = title.split('|')[0].strip()
         
-    # Lấy ảnh bìa
-    cover_url = None
-    img_tag = main_soup.select_one(".book img") or main_soup.select_one(".truyen-info img") or main_soup.select_one("article img")
-    if img_tag and img_tag.get('src'):
-        cover_url = img_tag['src']
-
     # Xác định domain và đường dẫn gốc của truyện để lọc link chống lấy nhầm
     parsed_url = urlparse(story_url)
     base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
-    # Lấy phần path của truyện (ví dụ: /truyen-full/ten-truyen/) để check xem link chương có thuộc về truyện này không
     story_path = parsed_url.path.rstrip('/')
+
+    # --- LẤY ẢNH BÌA CHUẨN XÁC ---
+    cover_url = None
+    img_tag = (
+        main_soup.select_one(".book img") 
+        or main_soup.select_one(".truyen-info img") 
+        or main_soup.select_one(".info-holder img")
+        or main_soup.select_one("article img")
+        or main_soup.select_one(".img-responsive")
+    )
+    if img_tag:
+        cover_url = img_tag.get('data-src') or img_tag.get('src')
 
     # --- QUÉT PHÂN TRANG THÔNG MINH & CHỐNG LẤY NHẦM TRUYỆN KHÁC ---
     links = []
@@ -118,7 +123,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 full_url = href if href.startswith("http") else base_domain + href
                 
                 # KIỂM TRA NGHIÊM NGẶT: Link chương phải thuộc đúng path của truyện này
-                # Tránh việc quét trúng các chương đề cử của truyện khác ở footer/sidebar
                 if story_path not in full_url:
                     continue
 
@@ -168,12 +172,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     book.set_title(title)
     book.set_language('vi')
     
-    # Thêm ảnh bìa
+    # Thêm ảnh bìa vào EPUB (với đầy đủ headers để tránh bị từ chối)
     if cover_url:
         try:
             full_cover_url = cover_url if cover_url.startswith("http") else base_domain + cover_url
-            img_data = scraper.get(full_cover_url, timeout=15).content
-            book.set_cover("cover.jpg", img_data)
+            img_response = scraper.get(full_cover_url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': base_domain
+            }, timeout=15)
+            
+            if img_response.status_code == 200:
+                book.set_cover("cover.jpg", img_response.content)
+                print(f"Đã tải thành công ảnh bìa từ: {full_cover_url}")
+            else:
+                print(f"Không thể tải ảnh bìa, mã lỗi: {img_response.status_code}")
         except Exception as e:
             print(f"Lỗi tải ảnh bìa: {e}")
 
