@@ -81,17 +81,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không thể kết nối tới trang truyện. Web có thể đang chặn hoặc sai link.")
         return
         
-    title_el = main_soup.select_one("h1") or main_soup.select_one(".title")
-    title = title_el.get_text().strip() if title_el else "Truyện"
+    # --- LẤY TÊN TRUYỆN CHUẨN XÁC HƠN ---
+    title_el = (
+        main_soup.select_one("h1") 
+        or main_soup.select_one(".title") 
+        or main_soup.select_one(".truyen-title")
+        or main_soup.select_one("[itemprop='name']")
+    )
+    
+    if title_el:
+        title = title_el.get_text().strip()
+    else:
+        # Fallback: Lấy trực tiếp từ thẻ <title> nếu không tìm thấy thẻ tiêu đề thông thường
+        page_title = main_soup.select_one("title")
+        title = page_title.get_text().strip() if page_title else "Truyện"
+
     if "|" in title:
         title = title.split('|')[0].strip()
+    # Loại bỏ các đuôi thừa thường gặp như " - Truyện Full"
+    title = re.sub(r'\s*-\s*(Truyện.*|Đọc.*)$', '', title, flags=re.IGNORECASE).strip()
+    if not title:
+        title = "Truyện Không Tên"
         
     # Xác định domain và đường dẫn gốc của truyện để lọc link chống lấy nhầm
     parsed_url = urlparse(story_url)
     base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
     story_path = parsed_url.path.rstrip('/')
 
-    # --- LẤY ẢNH BÌA CHUẨN XÁC ---
+    # --- LẤY ẢNH BÌA LINH HOẠT HƠN ---
     cover_url = None
     img_tag = (
         main_soup.select_one(".book img") 
@@ -99,9 +116,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         or main_soup.select_one(".info-holder img")
         or main_soup.select_one("article img")
         or main_soup.select_one(".img-responsive")
+        or main_soup.select_one(".box-image img")
     )
     if img_tag:
-        cover_url = img_tag.get('data-src') or img_tag.get('src')
+        cover_url = img_tag.get('data-src') or img_tag.get('src') or img_tag.get('data-lazy-src')
 
     # --- QUÉT PHÂN TRANG THÔNG MINH & CHỐNG LẤY NHẦM TRUYỆN KHÁC ---
     links = []
@@ -154,96 +172,4 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if story_url.endswith("/"):
                     guessed_url = f"{story_url}trang-{page_num + 1}/"
                 else:
-                    guessed_url = f"{story_url}/trang-{page_num + 1}/"
-                current_page_url = guessed_url
-                page_num += 1
-            else:
-                break
-        time.sleep(0.3)
-
-    if not links:
-        await status.edit_text("❌ Không tìm thấy chương nào hoặc link không hợp lệ.")
-        return
-        
-    await status.edit_text(f"📚 {title}\n✅ Quét thành công {len(links)} chương chuẩn xác. Đang tải nội dung...")
-    
-    book = epub.EpubBook()
-    book.set_identifier('truyen_' + re.sub(r'\W+', '', title))
-    book.set_title(title)
-    book.set_language('vi')
-    
-    # Thêm ảnh bìa vào EPUB (với đầy đủ headers để tránh bị từ chối)
-    if cover_url:
-        try:
-            full_cover_url = cover_url if cover_url.startswith("http") else base_domain + cover_url
-            img_response = scraper.get(full_cover_url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': base_domain
-            }, timeout=15)
-            
-            if img_response.status_code == 200:
-                book.set_cover("cover.jpg", img_response.content)
-                print(f"Đã tải thành công ảnh bìa từ: {full_cover_url}")
-            else:
-                print(f"Không thể tải ảnh bìa, mã lỗi: {img_response.status_code}")
-        except Exception as e:
-            print(f"Lỗi tải ảnh bìa: {e}")
-
-    chapters_list = []
-    success_count = 0
-    
-    for i, item in enumerate(links):
-        content = download_chapter(item['url'])
-        if content:
-            chap = epub.EpubHtml(title=item['name'], file_name=f"chap_{i+1}.xhtml")
-            chap.content = f"<h2>{item['name']}</h2>{content}"
-            book.add_item(chap)
-            chapters_list.append(chap)
-            success_count += 1
-        
-        if i % 15 == 0 or i == len(links) - 1:
-            pct = int((i / len(links)) * 100)
-            try:
-                await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(links)})")
-            except:
-                pass
-        time.sleep(0.2)
-
-    if success_count == 0:
-        await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
-        return
-
-    # Cấu hình Mục lục (TOC) chuẩn EPUB
-    book.toc = tuple(chapters_list)
-    book.spine = ['nav'] + chapters_list
-
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
-    
-    safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen"
-    file_name = f"{safe_title}.epub"
-    epub.write_epub(file_name, book)
-    
-    # Gửi file trực tiếp qua Telegram
-    await status.edit_text("⬆️ Đang gửi file EPUB qua Telegram...")
-    with open(file_name, "rb") as f:
-        await update.message.reply_document(
-            document=f, 
-            caption=f"✅ Xong: {title}\n📖 {success_count}/{len(links)} chương chuẩn xác + Ảnh bìa & Mục lục đầy đủ!"
-        )
-
-    await status.delete()
-    if os.path.exists(file_name):
-        os.remove(file_name)
-
-def main():
-    threading.Thread(target=run_web_server, daemon=True).start()
-    if not BOT_TOKEN:
-        print("❌ Thiếu BOT_TOKEN!")
-        return
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+                    guessed_url = f"{story_url}/trang-{page
